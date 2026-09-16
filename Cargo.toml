@@ -1,0 +1,11 @@
+[package]
+name = "personal-time-tracker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4"
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
