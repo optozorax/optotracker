@@ -16,7 +16,6 @@ use eframe::egui::{
 
 mod app_icon;
 mod github_activity;
-#[path = "../clockify_model.rs"]
 mod model;
 mod settings;
 mod single_instance;
