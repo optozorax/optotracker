@@ -1,14 +1,11 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chrono::{
-    DateTime, Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDate, NaiveDateTime,
-    NaiveTime, TimeZone, Timelike,
-};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use eframe::egui::{
     self, Align, Align2, AtomExt, Button, Color32, ComboBox, FontData, FontDefinitions, FontFamily,
     FontId, Frame, Layout, RichText, ScrollArea, Stroke,
@@ -16,17 +13,24 @@ use eframe::egui::{
 
 mod app_icon;
 mod github_activity;
+mod local_time;
 mod model;
+mod reports;
 mod settings;
 mod single_instance;
 mod storage;
 mod tray;
 
 use github_activity::{ActivitySegment, GithubActivity};
+use local_time::{datetime as local_datetime, timestamp as local_naive_timestamp};
 
 use model::{
     Activity, ActivityId, EntryId, Project, ProjectId, ProjectStatus, RgbColor, Store, TimeRange,
     UnixSeconds, MAX_ENTRY_SECONDS,
+};
+use reports::{
+    activity_stats, activity_totals, add_interval_to_days, project_stats,
+    project_totals_by_local_day, totals_by_local_day, totals_by_week, week_start, UsageStats,
 };
 use storage::JsonStore;
 
@@ -229,16 +233,6 @@ struct ProjectOption {
     status: ProjectStatus,
 }
 
-#[derive(Clone, Default)]
-struct UsageStats {
-    entries: usize,
-    total_seconds: u64,
-    active_days: usize,
-    first_used: Option<i64>,
-    last_used: Option<i64>,
-    related_count: usize,
-}
-
 struct TimeTrackerApp {
     repository: JsonStore,
     store: Store,
@@ -368,7 +362,7 @@ impl TimeTrackerApp {
     }
 
     fn timer_panel(&mut self, ui: &mut egui::Ui) {
-        let activities = activity_options(&self.store);
+        let activities = activity_options(&self.store, now());
         let projects = project_options(&self.store);
         let mut active_changed = false;
         let panel_width = ui.available_width();
@@ -468,11 +462,12 @@ impl TimeTrackerApp {
         let page_count = entry_count.div_ceil(ENTRIES_PER_PAGE).max(1);
         self.entry_page = self.entry_page.min(page_count - 1);
 
-        let activities = activity_options(&self.store);
+        let current_time = now();
+        let activities = activity_options(&self.store, current_time);
         let projects = project_options(&self.store);
-        let day_totals = totals_by_local_day(&self.store, now());
+        let day_totals = totals_by_local_day(&self.store, current_time);
         let project_segments: BTreeMap<NaiveDate, Vec<ActivitySegment>> =
-            project_totals_by_local_day(&self.store, now())
+            project_totals_by_local_day(&self.store, current_time)
                 .into_iter()
                 .map(|(date, contributions)| {
                     let segments = contributions
@@ -768,8 +763,9 @@ impl TimeTrackerApp {
             }
         }
 
+        let current_time = now();
         let stats: Vec<UsageStats> = (0..self.store.projects.len())
-            .map(|index| project_stats(&self.store, ProjectId(index)))
+            .map(|index| project_stats(&self.store, ProjectId(index), current_time))
             .collect();
         let mut changed = false;
         ui.add_space(12.0);
@@ -875,8 +871,9 @@ impl TimeTrackerApp {
             }
         }
 
+        let current_time = now();
         let stats: Vec<UsageStats> = (0..self.store.activities.len())
-            .map(|index| activity_stats(&self.store, ActivityId(index)))
+            .map(|index| activity_stats(&self.store, ActivityId(index), current_time))
             .collect();
         let mut activity_order: Vec<usize> = (0..self.store.activities.len()).collect();
         activity_order.sort_by(|left, right| {
@@ -1258,13 +1255,8 @@ fn pagination_controls(ui: &mut egui::Ui, page: &mut usize, total_entries: usize
     });
 }
 
-fn activity_options(store: &Store) -> Vec<ActivityOption> {
-    let mut totals = vec![0_u64; store.activities.len()];
-    for (activity, _, start, stop) in usage_intervals(store) {
-        if let Some(total) = totals.get_mut(activity.0) {
-            *total += stop.checked_sub(start).unwrap_or(0).max(0) as u64;
-        }
-    }
+fn activity_options(store: &Store, now: i64) -> Vec<ActivityOption> {
+    let totals = activity_totals(store, now);
     let mut options: Vec<_> = store
         .activities
         .iter()
@@ -1528,159 +1520,6 @@ fn format_stat_date(timestamp: Option<i64>) -> String {
         .unwrap_or_else(|| "-".to_owned())
 }
 
-fn usage_intervals(store: &Store) -> Vec<(ActivityId, Option<ProjectId>, i64, i64)> {
-    let mut intervals: Vec<_> = store
-        .time_entries
-        .iter()
-        .map(|entry| {
-            (
-                entry.activity,
-                entry.project,
-                entry.time.started_at.0,
-                entry.time.stopped_at.0,
-            )
-        })
-        .collect();
-    if let Some(active) = &store.active_entry {
-        intervals.push((active.activity, active.project, active.started_at.0, now()));
-    }
-    intervals
-}
-
-fn project_stats(store: &Store, project: ProjectId) -> UsageStats {
-    let mut stats = UsageStats::default();
-    let mut days = BTreeSet::new();
-    let mut activity_totals: BTreeMap<usize, u64> = BTreeMap::new();
-    for (activity, entry_project, start, stop) in usage_intervals(store) {
-        if entry_project != Some(project) || stop <= start {
-            continue;
-        }
-        let seconds = (stop - start) as u64;
-        stats.entries += 1;
-        stats.total_seconds += seconds;
-        stats.first_used = Some(stats.first_used.map_or(start, |value| value.min(start)));
-        stats.last_used = Some(stats.last_used.map_or(start, |value| value.max(start)));
-        *activity_totals.entry(activity.0).or_default() += seconds;
-        let mut split = BTreeMap::new();
-        add_interval_to_days(&mut split, start, stop);
-        days.extend(split.into_keys());
-    }
-    stats.active_days = days.len();
-    stats.related_count = activity_totals.len();
-    stats
-}
-
-fn activity_stats(store: &Store, activity: ActivityId) -> UsageStats {
-    let mut stats = UsageStats::default();
-    let mut days = BTreeSet::new();
-    let mut project_totals: BTreeMap<Option<usize>, u64> = BTreeMap::new();
-    for (entry_activity, project, start, stop) in usage_intervals(store) {
-        if entry_activity != activity || stop <= start {
-            continue;
-        }
-        let seconds = (stop - start) as u64;
-        stats.entries += 1;
-        stats.total_seconds += seconds;
-        stats.first_used = Some(stats.first_used.map_or(start, |value| value.min(start)));
-        stats.last_used = Some(stats.last_used.map_or(start, |value| value.max(start)));
-        *project_totals
-            .entry(project.map(|project| project.0))
-            .or_default() += seconds;
-        let mut split = BTreeMap::new();
-        add_interval_to_days(&mut split, start, stop);
-        days.extend(split.into_keys());
-    }
-    stats.active_days = days.len();
-    stats.related_count = project_totals
-        .keys()
-        .filter(|project| project.is_some())
-        .count();
-    stats
-}
-
-fn totals_by_local_day(store: &Store, current_time: i64) -> BTreeMap<NaiveDate, u64> {
-    let mut totals = BTreeMap::new();
-    for entry in &store.time_entries {
-        add_interval_to_days(
-            &mut totals,
-            entry.time.started_at.0,
-            entry.time.stopped_at.0,
-        );
-    }
-    if let Some(active) = &store.active_entry {
-        add_interval_to_days(&mut totals, active.started_at.0, current_time);
-    }
-    totals
-}
-
-fn project_totals_by_local_day(
-    store: &Store,
-    current_time: i64,
-) -> BTreeMap<NaiveDate, BTreeMap<Option<usize>, u64>> {
-    let mut totals = BTreeMap::new();
-    for entry in &store.time_entries {
-        add_project_interval_to_days(
-            &mut totals,
-            entry.project.map(|project| project.0),
-            entry.time.started_at.0,
-            entry.time.stopped_at.0,
-        );
-    }
-    if let Some(active) = &store.active_entry {
-        add_project_interval_to_days(
-            &mut totals,
-            active.project.map(|project| project.0),
-            active.started_at.0,
-            current_time,
-        );
-    }
-    totals
-}
-
-fn add_project_interval_to_days(
-    totals: &mut BTreeMap<NaiveDate, BTreeMap<Option<usize>, u64>>,
-    project: Option<usize>,
-    start: i64,
-    stop: i64,
-) {
-    let mut split = BTreeMap::new();
-    add_interval_to_days(&mut split, start, stop);
-    for (date, seconds) in split {
-        *totals.entry(date).or_default().entry(project).or_default() += seconds;
-    }
-}
-
-fn add_interval_to_days(totals: &mut BTreeMap<NaiveDate, u64>, start: i64, stop: i64) {
-    if stop <= start {
-        return;
-    }
-    let mut cursor = start;
-    while cursor < stop {
-        let date = local_datetime(cursor).date_naive();
-        let Some(next_date) = date.succ_opt() else {
-            break;
-        };
-        let next_midnight = local_naive_timestamp(next_date.and_hms_opt(0, 0, 0).unwrap())
-            .unwrap_or(stop)
-            .max(cursor + 1);
-        let segment_end = stop.min(next_midnight);
-        *totals.entry(date).or_default() += (segment_end - cursor) as u64;
-        cursor = segment_end;
-    }
-}
-
-fn totals_by_week(day_totals: &BTreeMap<NaiveDate, u64>) -> BTreeMap<NaiveDate, u64> {
-    let mut totals = BTreeMap::new();
-    for (&date, &seconds) in day_totals {
-        *totals.entry(week_start(date)).or_default() += seconds;
-    }
-    totals
-}
-
-fn week_start(date: NaiveDate) -> NaiveDate {
-    date - ChronoDuration::days(date.weekday().num_days_from_monday() as i64)
-}
-
 fn week_title(week: NaiveDate, this_week: NaiveDate) -> String {
     if week == this_week {
         "This week".to_owned()
@@ -1788,22 +1627,8 @@ fn edited_time_range(
     })
 }
 
-fn local_naive_timestamp(value: NaiveDateTime) -> Result<i64, String> {
-    match Local.from_local_datetime(&value) {
-        LocalResult::Single(value) => Ok(value.timestamp()),
-        LocalResult::Ambiguous(first, _) => Ok(first.timestamp()),
-        LocalResult::None => Err("That local time does not exist in this time zone".to_owned()),
-    }
-}
-
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
-}
-
-fn local_datetime(seconds: i64) -> DateTime<Local> {
-    DateTime::from_timestamp(seconds, 0)
-        .unwrap_or(DateTime::UNIX_EPOCH)
-        .with_timezone(&Local)
 }
 
 fn format_duration(seconds: u64) -> String {
