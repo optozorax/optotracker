@@ -197,7 +197,7 @@ impl DatePickerPopup<'_> {
             .num_columns(7)
             .spacing(egui::vec2(4.0, 3.0))
             .show(ui, |ui| {
-                for weekday in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] {
+                for weekday in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
                     ui.allocate_ui_with_layout(
                         egui::vec2(36.0, 20.0),
                         Layout::centered_and_justified(egui::Direction::TopDown),
