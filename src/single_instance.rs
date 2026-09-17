@@ -41,6 +41,21 @@ mod platform {
                 );
             }
         }
+
+        pub fn show_error_message(message: &str) {
+            use windows::core::PCWSTR;
+
+            let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: both UTF-16 strings are terminated and remain alive for the call.
+            unsafe {
+                MessageBoxW(
+                    None,
+                    PCWSTR(message.as_ptr()),
+                    w!("OptoTracker could not start"),
+                    MB_OK,
+                );
+            }
+        }
     }
 
     impl Drop for SingleInstanceGuard {
@@ -63,6 +78,10 @@ mod platform {
         }
 
         pub fn show_already_running_message() {}
+
+        pub fn show_error_message(message: &str) {
+            eprintln!("OptoTracker could not start: {message}");
+        }
     }
 }
 

@@ -95,7 +95,7 @@ mod platform {
 
     impl TrayController {
         pub fn new(_running: bool) -> Result<Self, String> {
-            Ok(Self)
+            Err("system tray integration is unavailable on this platform".to_owned())
         }
 
         pub fn set_running(&self, _running: bool) -> Result<(), String> {

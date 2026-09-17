@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{
@@ -19,14 +19,16 @@ mod github_activity;
 mod model;
 mod settings;
 mod single_instance;
+mod storage;
 mod tray;
 
 use github_activity::{ActivitySegment, GithubActivity};
 
 use model::{
-    ActiveTimeEntry, Activity, ActivityId, Project, ProjectId, ProjectStatus, RgbColor, Store,
-    TimeEntry, TimeRange, UnixSeconds,
+    Activity, ActivityId, EntryId, Project, ProjectId, ProjectStatus, RgbColor, Store, TimeRange,
+    UnixSeconds, MAX_ENTRY_SECONDS,
 };
+use storage::JsonStore;
 
 const BLUE: Color32 = Color32::from_rgb(3, 169, 244);
 const RED: Color32 = Color32::from_rgb(244, 67, 54);
@@ -51,18 +53,40 @@ fn main() -> eframe::Result {
     };
 
     let mut start_minimized = false;
-    let mut source_store_path = None;
+    let mut store_path = None;
     for argument in std::env::args_os().skip(1) {
         if argument == "--minimized" {
             start_minimized = true;
-        } else if source_store_path.is_none() {
-            source_store_path = Some(PathBuf::from(argument));
+        } else if store_path.is_none() {
+            store_path = Some(PathBuf::from(argument));
+        } else {
+            single_instance::SingleInstanceGuard::show_error_message(
+                "Usage: OptoTracker.exe [--minimized] [DATA_FILE]",
+            );
+            return Ok(());
         }
     }
-    let source_store_path = source_store_path.unwrap_or_else(default_store_path);
-    let (store_path, startup_message) = match settings::prepare_data(&source_store_path) {
-        Ok(path) => (path, String::new()),
-        Err(error) => (source_store_path, error),
+    let store_path = match store_path.map(Ok).unwrap_or_else(settings::data_path) {
+        Ok(path) => path,
+        Err(error) => {
+            single_instance::SingleInstanceGuard::show_error_message(&error);
+            return Ok(());
+        }
+    };
+    let repository = JsonStore::new(store_path);
+    let store = match repository.load() {
+        Ok(store) => store,
+        Err(error) => {
+            single_instance::SingleInstanceGuard::show_error_message(&error.to_string());
+            return Ok(());
+        }
+    };
+    let persistence_path = match settings::persistence_path() {
+        Ok(path) => path,
+        Err(error) => {
+            single_instance::SingleInstanceGuard::show_error_message(&error);
+            return Ok(());
+        }
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -71,7 +95,7 @@ fn main() -> eframe::Result {
             .with_visible(!start_minimized)
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([820.0, 560.0]),
-        persistence_path: Some(settings::persistence_path()),
+        persistence_path: Some(persistence_path),
         ..Default::default()
     };
     eframe::run_native(
@@ -81,10 +105,11 @@ fn main() -> eframe::Result {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
             configure_fonts(&cc.egui_ctx);
             Ok(Box::new(TimeTrackerApp::load(
-                store_path.clone(),
-                startup_message.clone(),
+                repository.clone(),
+                store.clone(),
                 cc.storage,
                 start_minimized,
+                &cc.egui_ctx,
             )))
         }),
     )
@@ -186,7 +211,7 @@ enum TimeEndpoint {
 
 #[derive(Clone)]
 struct TimeEditRequest {
-    entry_index: usize,
+    entry_id: EntryId,
     endpoint: TimeEndpoint,
     text: String,
 }
@@ -215,8 +240,9 @@ struct UsageStats {
 }
 
 struct TimeTrackerApp {
-    store_path: PathBuf,
+    repository: JsonStore,
     store: Store,
+    last_saved_store: Store,
     view: AppView,
     draft_activity: ActivityId,
     draft_project: Option<ProjectId>,
@@ -224,7 +250,7 @@ struct TimeTrackerApp {
     new_project_name: String,
     new_project_color: [u8; 3],
     new_activity_name: String,
-    time_edit_buffers: BTreeMap<(usize, TimeEndpoint), String>,
+    time_edit_buffers: BTreeMap<(EntryId, TimeEndpoint), String>,
     github_activity: GithubActivity,
     entry_page: usize,
     last_icon_running: Option<bool>,
@@ -238,22 +264,12 @@ struct TimeTrackerApp {
 
 impl TimeTrackerApp {
     fn load(
-        store_path: PathBuf,
-        startup_message: String,
+        repository: JsonStore,
+        store: Store,
         storage: Option<&dyn eframe::Storage>,
         start_minimized: bool,
+        ctx: &egui::Context,
     ) -> Self {
-        let (store, load_message) = match read_store(&store_path) {
-            Ok(store) => (store, String::new()),
-            Err(error) => (Store::default(), format!("Could not load data: {error}")),
-        };
-        let message = if startup_message.is_empty() {
-            load_message
-        } else if load_message.is_empty() {
-            startup_message
-        } else {
-            format!("{startup_message}; {load_message}")
-        };
         let draft_activity = ActivityId(store.activities.len().saturating_sub(1));
         let running = store.active_entry.is_some();
         let tray = tray::TrayController::new(running);
@@ -261,16 +277,21 @@ impl TimeTrackerApp {
             .and_then(|storage| eframe::get_value(storage, "opto_tracker_settings"))
             .unwrap_or_default();
         let message = match &tray {
-            Ok(_) => message,
-            Err(error) if message.is_empty() => format!("Could not create tray icon: {error}"),
-            Err(error) => format!("{message}; could not create tray icon: {error}"),
+            Ok(_) => String::new(),
+            Err(error) => format!("Could not create tray icon: {error}"),
         };
+        let tray = tray.ok();
+        let window_hidden = start_minimized && tray.is_some();
+        if start_minimized && tray.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
         let autorun_enabled = settings::autorun_enabled();
         if autorun_enabled {
             let _ = settings::set_autorun(true, preferences.start_minimized_on_autorun);
         }
         Self {
-            store_path,
+            repository,
+            last_saved_store: store.clone(),
             store,
             view: AppView::Entries,
             draft_activity,
@@ -283,9 +304,9 @@ impl TimeTrackerApp {
             github_activity: GithubActivity::default(),
             entry_page: 0,
             last_icon_running: None,
-            tray: tray.ok(),
+            tray,
             exit_requested: false,
-            window_hidden: start_minimized,
+            window_hidden,
             preferences,
             autorun_enabled,
             settings_message: String::new(),
@@ -293,9 +314,19 @@ impl TimeTrackerApp {
     }
 
     fn save(&mut self) {
-        match write_store(&self.store_path, &self.store) {
-            Ok(()) => self.message = "Saved".to_owned(),
-            Err(error) => self.message = format!("Save failed: {error}"),
+        match self.repository.save(&self.store) {
+            Ok(outcome) => {
+                self.last_saved_store = self.store.clone();
+                self.message = outcome
+                    .backup_warning
+                    .map(|warning| format!("Saved; backup warning: {warning}"))
+                    .unwrap_or_else(|| "Saved".to_owned());
+            }
+            Err(error) => {
+                self.store = self.last_saved_store.clone();
+                self.time_edit_buffers.clear();
+                self.message = format!("Save failed; change was reverted: {error}");
+            }
         }
     }
 
@@ -304,44 +335,36 @@ impl TimeTrackerApp {
     }
 
     fn start_with(&mut self, activity: ActivityId, project: Option<ProjectId>) {
-        if self.store.active_entry.is_some() {
-            self.message = "Stop the current timer before starting another".to_owned();
+        if let Err(error) = self
+            .store
+            .start_timer(activity, project, UnixSeconds(now()))
+        {
+            self.message = error.to_string();
             return;
         }
-        if activity.0 >= self.store.activities.len() {
-            self.message = "Create an activity before starting a timer".to_owned();
-            return;
-        }
-        self.store.active_entry = Some(ActiveTimeEntry {
-            activity,
-            project,
-            started_at: UnixSeconds(now()),
-        });
         self.draft_activity = activity;
         self.draft_project = project;
         self.save();
     }
 
     fn stop_timer(&mut self) {
-        let Some(active) = self.store.active_entry.take() else {
+        let Some(active) = self.store.active_entry.clone() else {
             return;
         };
-        let stopped_at = UnixSeconds(now().max(active.started_at.0));
-        self.store.time_entries.push(TimeEntry {
-            activity: active.activity,
-            project: active.project,
-            time: TimeRange {
-                started_at: active.started_at,
-                stopped_at,
-            },
-        });
-        self.store
-            .time_entries
-            .sort_by_key(|entry| entry.time.started_at);
+        let outcome = match self.store.stop_timer(UnixSeconds(now())) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.message = error.to_string();
+                return;
+            }
+        };
         self.time_edit_buffers.clear();
         self.draft_activity = active.activity;
         self.draft_project = active.project;
         self.save();
+        if outcome.capped_at_limit && self.store.active_entry.is_none() {
+            self.message = "Timer stopped at the 24-hour limit".to_owned();
+        }
     }
 
     fn timer_panel(&mut self, ui: &mut egui::Ui) {
@@ -364,7 +387,10 @@ impl TimeTrackerApp {
                             .as_ref()
                             .map(|active| active.started_at.0);
                         let elapsed = started_at
-                            .map(|started_at| now().saturating_sub(started_at) as u64)
+                            .map(|started_at| {
+                                (now().checked_sub(started_at).unwrap_or(0).max(0) as u64)
+                                    .min(MAX_ENTRY_SECONDS as u64)
+                            })
                             .unwrap_or(0);
                         if started_at.is_some() {
                             if ui
@@ -581,6 +607,7 @@ impl TimeTrackerApp {
                     }
                     for index in indices {
                         let entry = &mut self.store.time_entries[index];
+                        let entry_id = entry.id;
                         Frame::new()
                             .fill(Color32::WHITE)
                             .stroke(Stroke::new(1.0, BORDER))
@@ -593,19 +620,19 @@ impl TimeTrackerApp {
                                 ui.horizontal(|ui| {
                                     changed |= activity_combo(
                                         ui,
-                                        ("entry-activity", index),
+                                        ("entry-activity", entry_id),
                                         &mut entry.activity,
                                         &activities,
                                     );
                                     changed |= project_combo(
                                         ui,
-                                        ("entry-project", index),
+                                        ("entry-project", entry_id),
                                         &mut entry.project,
                                         &projects,
                                     );
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                         if cross_icon_button(ui) {
-                                            delete = Some(index);
+                                            delete = Some(entry_id);
                                         }
                                         if play_icon_button(ui, can_start) {
                                             start_request = Some((entry.activity, entry.project));
@@ -621,7 +648,7 @@ impl TimeTrackerApp {
                                         if let Some(edit) = inline_time_field(
                                             ui,
                                             &mut self.time_edit_buffers,
-                                            index,
+                                            entry_id,
                                             TimeEndpoint::Stop,
                                             stop_label(entry.time),
                                         ) {
@@ -631,7 +658,7 @@ impl TimeTrackerApp {
                                         if let Some(edit) = inline_time_field(
                                             ui,
                                             &mut self.time_edit_buffers,
-                                            index,
+                                            entry_id,
                                             TimeEndpoint::Start,
                                             start_label(entry.time),
                                         ) {
@@ -646,8 +673,8 @@ impl TimeTrackerApp {
                 ui.add_space(16.0);
                 pagination_controls(ui, &mut self.entry_page, entry_count);
             });
-        if let Some(index) = delete {
-            self.store.time_entries.remove(index);
+        if let Some(entry_id) = delete {
+            self.store.remove_entry(entry_id);
             self.time_edit_buffers.clear();
             changed = true;
         }
@@ -665,14 +692,13 @@ impl TimeTrackerApp {
     fn apply_inline_time_edit(&mut self, edit: TimeEditRequest) {
         let result = self
             .store
-            .time_entries
-            .get(edit.entry_index)
+            .entry(edit.entry_id)
             .cloned()
             .ok_or_else(|| "The entry no longer exists".to_owned())
             .and_then(|entry| edited_time_range(entry.time, edit.endpoint, &edit.text));
         match result {
             Ok(time) => {
-                if let Some(entry) = self.store.time_entries.get_mut(edit.entry_index) {
+                if let Some(entry) = self.store.entry_mut(edit.entry_id) {
                     entry.time = time;
                     self.store
                         .time_entries
@@ -684,7 +710,7 @@ impl TimeTrackerApp {
             Err(error) => {
                 self.message = error;
                 self.time_edit_buffers
-                    .remove(&(edit.entry_index, edit.endpoint));
+                    .remove(&(edit.entry_id, edit.endpoint));
             }
         }
     }
@@ -921,9 +947,7 @@ impl TimeTrackerApp {
             .show(ui, |ui| {
                 ui.set_min_width((width - 38.0).max(0.0));
                 ui.heading("Application folder");
-                ui.label(
-                    RichText::new(settings::app_directory().display().to_string()).monospace(),
-                );
+                ui.label(RichText::new(self.repository.path().display().to_string()).monospace());
                 ui.label(
                     RichText::new(
                         "Tracker data and UI persistence are stored directly in this folder.",
@@ -989,7 +1013,9 @@ impl TimeTrackerApp {
                 }
                 ui.horizontal(|ui| {
                     ui.label("Data:");
-                    ui.label(RichText::new(settings::DATA_FILE).monospace());
+                    ui.label(
+                        RichText::new(self.repository.path().display().to_string()).monospace(),
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.label("Persistence:");
@@ -1053,9 +1079,12 @@ impl TimeTrackerApp {
                 }
 
                 ui.add_space(6.0);
-                ui.checkbox(
-                    &mut self.preferences.close_or_minimize_to_tray,
-                    "Send OptoTracker to the tray when closed or minimized",
+                ui.add_enabled(
+                    self.tray.is_some(),
+                    egui::Checkbox::new(
+                        &mut self.preferences.close_or_minimize_to_tray,
+                        "Send OptoTracker to the tray when closed or minimized",
+                    ),
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
                 ui.label(
@@ -1091,7 +1120,8 @@ impl TimeTrackerApp {
                 input.viewport().minimized == Some(true),
             )
         });
-        if self.preferences.close_or_minimize_to_tray && !self.exit_requested {
+        if self.preferences.close_or_minimize_to_tray && self.tray.is_some() && !self.exit_requested
+        {
             if close_requested {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -1107,6 +1137,14 @@ impl TimeTrackerApp {
 
 impl eframe::App for TimeTrackerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let timer_reached_limit = self.store.active_entry.as_ref().is_some_and(|active| {
+            now()
+                .checked_sub(active.started_at.0)
+                .is_some_and(|elapsed| elapsed >= MAX_ENTRY_SECONDS)
+        });
+        if timer_reached_limit {
+            self.stop_timer();
+        }
         self.handle_window_and_tray(ctx);
     }
 
@@ -1224,7 +1262,7 @@ fn activity_options(store: &Store) -> Vec<ActivityOption> {
     let mut totals = vec![0_u64; store.activities.len()];
     for (activity, _, start, stop) in usage_intervals(store) {
         if let Some(total) = totals.get_mut(activity.0) {
-            *total += stop.saturating_sub(start) as u64;
+            *total += stop.checked_sub(start).unwrap_or(0).max(0) as u64;
         }
     }
     let mut options: Vec<_> = store
@@ -1677,23 +1715,23 @@ fn stop_label(time: TimeRange) -> String {
 
 fn inline_time_field(
     ui: &mut egui::Ui,
-    buffers: &mut BTreeMap<(usize, TimeEndpoint), String>,
-    entry_index: usize,
+    buffers: &mut BTreeMap<(EntryId, TimeEndpoint), String>,
+    entry_id: EntryId,
     endpoint: TimeEndpoint,
     label: String,
 ) -> Option<TimeEditRequest> {
     let text = buffers
-        .entry((entry_index, endpoint))
+        .entry((entry_id, endpoint))
         .or_insert_with(|| label.clone());
     let response = ui.add(
         egui::TextEdit::singleline(text)
-            .id_salt(("inline-time", entry_index, endpoint))
+            .id_salt(("inline-time", entry_id, endpoint))
             .desired_width(52.0)
             .horizontal_align(Align::Center),
     );
     if response.lost_focus() && *text != label {
         Some(TimeEditRequest {
-            entry_index,
+            entry_id,
             endpoint,
             text: text.clone(),
         })
@@ -1758,29 +1796,6 @@ fn local_naive_timestamp(value: NaiveDateTime) -> Result<i64, String> {
     }
 }
 
-fn read_store(path: &Path) -> Result<Store, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
-}
-
-fn default_store_path() -> PathBuf {
-    let relative = PathBuf::from("data/time_tracker_store.json");
-    if relative.exists() {
-        relative
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("data")
-            .join("time_tracker_store.json")
-    }
-}
-
-fn write_store(path: &Path, store: &Store) -> Result<(), String> {
-    settings::back_up_if_due(path)?;
-    let mut json = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
-    json.push('\n');
-    settings::atomic_write(path, json.as_bytes())
-}
-
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -1825,24 +1840,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converted_store_loads_and_all_indices_are_valid() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("data")
-            .join("time_tracker_store.json");
-        let store = read_store(&path).expect("converted store must load");
-        assert!(!store.time_entries.is_empty());
+    fn synthetic_store_has_valid_references() {
+        let store = Store {
+            projects: vec![Project {
+                name: "Project".to_owned(),
+                color: RgbColor {
+                    red: 1,
+                    green: 2,
+                    blue: 3,
+                },
+                status: ProjectStatus::Active,
+            }],
+            activities: vec![Activity {
+                name: "Activity".to_owned(),
+            }],
+            time_entries: vec![model::TimeEntry {
+                id: EntryId(1),
+                activity: ActivityId(0),
+                project: Some(ProjectId(0)),
+                time: TimeRange {
+                    started_at: UnixSeconds(10),
+                    stopped_at: UnixSeconds(20),
+                },
+            }],
+            ..Store::default()
+        };
+        store.validate().unwrap();
         for entry in &store.time_entries {
             assert!(entry.activity.0 < store.activities.len());
             assert!(entry
                 .project
                 .is_none_or(|project| project.0 < store.projects.len()));
             assert!(entry.time.stopped_at >= entry.time.started_at);
-        }
-        if let Some(entry) = &store.active_entry {
-            assert!(entry.activity.0 < store.activities.len());
-            assert!(entry
-                .project
-                .is_none_or(|project| project.0 < store.projects.len()));
         }
     }
 

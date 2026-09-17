@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
+pub const MAX_ENTRY_SECONDS: i64 = 24 * 60 * 60;
+
 /// Seconds since the Unix epoch, always stored as UTC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -18,6 +21,14 @@ pub struct ProjectId(pub usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ActivityId(pub usize);
+
+/// Stable identity for a completed entry. Unlike a vector position, this does
+/// not change when entries are sorted or another entry is deleted.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct EntryId(pub u64);
 
 /// A completed measurement. Running timers are stored separately in
 /// `Store::active_entry`, so historical entries cannot be started again.
@@ -65,6 +76,10 @@ pub struct Activity {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeEntry {
+    /// Version 1 stores did not have entry IDs. The storage adapter assigns
+    /// them while decoding that version.
+    #[serde(default)]
+    pub id: EntryId,
     pub activity: ActivityId,
     pub project: Option<ProjectId>,
     pub time: TimeRange,
@@ -98,11 +113,226 @@ pub struct Store {
 impl Default for Store {
     fn default() -> Self {
         Self {
-            format_version: 1,
+            format_version: CURRENT_FORMAT_VERSION,
             projects: Vec::new(),
             activities: Vec::new(),
             time_entries: Vec::new(),
             active_entry: None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StopOutcome {
+    pub entry_id: EntryId,
+    pub capped_at_limit: bool,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ModelError {
+    #[error("unsupported data format version {0}")]
+    UnsupportedFormat(u32),
+    #[error("entry ID {0} is duplicated or reserved")]
+    InvalidEntryId(u64),
+    #[error("activity {0} does not exist")]
+    MissingActivity(usize),
+    #[error("project {0} does not exist")]
+    MissingProject(usize),
+    #[error("an entry stops before it starts")]
+    NegativeDuration,
+    #[error("a time entry cannot be longer than 24 hours")]
+    EntryTooLong,
+    #[error("a timer is already running")]
+    TimerAlreadyRunning,
+    #[error("no timer is running")]
+    NoActiveTimer,
+    #[error("the system clock is earlier than the timer start")]
+    ClockMovedBackwards,
+    #[error("the entry ID space is exhausted")]
+    EntryIdExhausted,
+}
+
+impl Store {
+    /// Upgrade the only historical format supported by this application.
+    /// This is schema compatibility, independent of file-location migration.
+    pub fn upgrade_v1(mut self) -> Self {
+        for (index, entry) in self.time_entries.iter_mut().enumerate() {
+            entry.id = EntryId(index as u64 + 1);
+        }
+        self.format_version = CURRENT_FORMAT_VERSION;
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        use std::collections::BTreeSet;
+
+        if self.format_version != CURRENT_FORMAT_VERSION {
+            return Err(ModelError::UnsupportedFormat(self.format_version));
+        }
+
+        let mut entry_ids = BTreeSet::new();
+        for entry in &self.time_entries {
+            if entry.id.0 == 0 || !entry_ids.insert(entry.id) {
+                return Err(ModelError::InvalidEntryId(entry.id.0));
+            }
+            self.validate_references(entry.activity, entry.project)?;
+            let duration = entry.time.stopped_at.0 - entry.time.started_at.0;
+            if duration < 0 {
+                return Err(ModelError::NegativeDuration);
+            }
+            if duration > MAX_ENTRY_SECONDS {
+                return Err(ModelError::EntryTooLong);
+            }
+        }
+        if let Some(active) = &self.active_entry {
+            self.validate_references(active.activity, active.project)?;
+        }
+        Ok(())
+    }
+
+    pub fn start_timer(
+        &mut self,
+        activity: ActivityId,
+        project: Option<ProjectId>,
+        now: UnixSeconds,
+    ) -> Result<(), ModelError> {
+        if self.active_entry.is_some() {
+            return Err(ModelError::TimerAlreadyRunning);
+        }
+        self.validate_references(activity, project)?;
+        self.active_entry = Some(ActiveTimeEntry {
+            activity,
+            project,
+            started_at: now,
+        });
+        Ok(())
+    }
+
+    /// Complete the active timer. Timers are deliberately limited to 24 hours;
+    /// a forgotten timer is capped at that boundary instead of producing a
+    /// multi-day entry.
+    pub fn stop_timer(&mut self, now: UnixSeconds) -> Result<StopOutcome, ModelError> {
+        let active = self
+            .active_entry
+            .as_ref()
+            .ok_or(ModelError::NoActiveTimer)?;
+        if now.0 < active.started_at.0 {
+            return Err(ModelError::ClockMovedBackwards);
+        }
+        let capped_at_limit = now.0 - active.started_at.0 > MAX_ENTRY_SECONDS;
+        let stopped_at = UnixSeconds(now.0.min(active.started_at.0 + MAX_ENTRY_SECONDS));
+        let active = self.active_entry.take().expect("checked above");
+        let entry_id = self.next_entry_id()?;
+        self.time_entries.push(TimeEntry {
+            id: entry_id,
+            activity: active.activity,
+            project: active.project,
+            time: TimeRange {
+                started_at: active.started_at,
+                stopped_at,
+            },
+        });
+        self.time_entries.sort_by_key(|entry| entry.time.started_at);
+        Ok(StopOutcome {
+            entry_id,
+            capped_at_limit,
+        })
+    }
+
+    pub fn entry(&self, id: EntryId) -> Option<&TimeEntry> {
+        self.time_entries.iter().find(|entry| entry.id == id)
+    }
+
+    pub fn entry_mut(&mut self, id: EntryId) -> Option<&mut TimeEntry> {
+        self.time_entries.iter_mut().find(|entry| entry.id == id)
+    }
+
+    pub fn remove_entry(&mut self, id: EntryId) -> Option<TimeEntry> {
+        let index = self.time_entries.iter().position(|entry| entry.id == id)?;
+        Some(self.time_entries.remove(index))
+    }
+
+    fn validate_references(
+        &self,
+        activity: ActivityId,
+        project: Option<ProjectId>,
+    ) -> Result<(), ModelError> {
+        if activity.0 >= self.activities.len() {
+            return Err(ModelError::MissingActivity(activity.0));
+        }
+        if let Some(project) = project.filter(|project| project.0 >= self.projects.len()) {
+            return Err(ModelError::MissingProject(project.0));
+        }
+        Ok(())
+    }
+
+    fn next_entry_id(&self) -> Result<EntryId, ModelError> {
+        self.time_entries
+            .iter()
+            .map(|entry| entry.id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .map(EntryId)
+            .ok_or(ModelError::EntryIdExhausted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_with_activity() -> Store {
+        Store {
+            activities: vec![Activity {
+                name: "Work".to_owned(),
+            }],
+            ..Store::default()
+        }
+    }
+
+    #[test]
+    fn entry_ids_survive_sorting_and_deletion() {
+        let mut store = store_with_activity();
+        store
+            .start_timer(ActivityId(0), None, UnixSeconds(20))
+            .unwrap();
+        let second = store.stop_timer(UnixSeconds(30)).unwrap().entry_id;
+        store
+            .start_timer(ActivityId(0), None, UnixSeconds(0))
+            .unwrap();
+        let first = store.stop_timer(UnixSeconds(10)).unwrap().entry_id;
+
+        assert_eq!(store.entry(first).unwrap().time.started_at, UnixSeconds(0));
+        assert_eq!(
+            store.entry(second).unwrap().time.started_at,
+            UnixSeconds(20)
+        );
+        store.remove_entry(first).unwrap();
+        assert_eq!(
+            store.entry(second).unwrap().time.started_at,
+            UnixSeconds(20)
+        );
+    }
+
+    #[test]
+    fn forgotten_timer_is_capped_at_24_hours() {
+        let mut store = store_with_activity();
+        store
+            .start_timer(ActivityId(0), None, UnixSeconds(100))
+            .unwrap();
+        let outcome = store
+            .stop_timer(UnixSeconds(100 + MAX_ENTRY_SECONDS + 60))
+            .unwrap();
+
+        assert!(outcome.capped_at_limit);
+        assert_eq!(
+            store
+                .entry(outcome.entry_id)
+                .unwrap()
+                .time
+                .duration_seconds(),
+            Some(MAX_ENTRY_SECONDS as u64)
+        );
     }
 }
