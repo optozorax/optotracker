@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 use eframe::egui::{
     self, Align, Align2, AtomExt, Button, Color32, ComboBox, FontData, FontDefinitions, FontFamily,
     FontId, Frame, Layout, RichText, ScrollArea, Stroke,
@@ -23,7 +23,7 @@ mod storage;
 mod tray;
 
 use github_activity::{heat_color, CalendarHeatmap, CellFill, Segment};
-use local_time::{datetime as local_datetime, timestamp as local_naive_timestamp};
+use local_time::{datetime as local_datetime, TimeEndpoint};
 
 use model::{
     Activity, ActivityId, EntryId, Project, ProjectId, ProjectStatus, RgbColor, Store, TimeRange,
@@ -92,7 +92,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("OptoTracker")
             .with_icon(app_icon::icon_data(false))
-            .with_visible(!start_minimized)
+            .with_visible(true)
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([820.0, 560.0]),
         persistence_path: Some(app_paths.persistence.clone()),
@@ -211,12 +211,6 @@ impl Default for PersistedSettings {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum TimeEndpoint {
-    Start,
-    Stop,
-}
-
 #[derive(Clone)]
 struct TimeEditRequest {
     entry_id: EntryId,
@@ -290,8 +284,8 @@ impl TimeTrackerApp {
         };
         let tray = tray.ok();
         let window_hidden = start_minimized && tray.is_some();
-        if start_minimized && tray.is_none() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        if window_hidden {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         let autorun_enabled = desktop::autorun_enabled();
         if autorun_enabled {
@@ -766,7 +760,9 @@ impl TimeTrackerApp {
             self.save();
         }
         for edit in time_commits {
-            self.apply_inline_time_edit(edit);
+            if delete != Some(edit.entry_id) {
+                self.apply_inline_time_edit(edit);
+            }
         }
         if let Some((activity, project)) = start_request {
             self.start_with(activity, project);
@@ -779,7 +775,7 @@ impl TimeTrackerApp {
             .entry(edit.entry_id)
             .cloned()
             .ok_or_else(|| "The entry no longer exists".to_owned())
-            .and_then(|entry| edited_time_range(entry.time, edit.endpoint, &edit.text));
+            .and_then(|entry| local_time::edit_time(entry.time, edit.endpoint, &edit.text));
         match result {
             Ok(time) => {
                 if let Some(entry) = self.store.entry_mut(edit.entry_id) {
@@ -1679,54 +1675,6 @@ fn inline_time_field(
     }
 }
 
-fn edited_time_range(
-    original: TimeRange,
-    endpoint: TimeEndpoint,
-    edited_text: &str,
-) -> Result<TimeRange, String> {
-    let original_start = local_datetime(original.started_at.0);
-    let original_stop = local_datetime(original.stopped_at.0);
-    let original_endpoint = match endpoint {
-        TimeEndpoint::Start => original_start.time(),
-        TimeEndpoint::Stop => original_stop.time(),
-    };
-    let edited = NaiveTime::parse_from_str(edited_text.trim(), "%H:%M")
-        .map_err(|_| "Time must use HH:MM".to_owned())?
-        .with_second(original_endpoint.second())
-        .and_then(|time| time.with_nanosecond(original_endpoint.nanosecond()))
-        .ok_or_else(|| "Time is out of range".to_owned())?;
-    let date = original_start.date_naive();
-    let start_time = if endpoint == TimeEndpoint::Start {
-        edited
-    } else {
-        original_start.time()
-    };
-    let stop_time = if endpoint == TimeEndpoint::Stop {
-        edited
-    } else {
-        original_stop.time()
-    };
-    if start_time == stop_time {
-        return Err("Start and stop time cannot be equal".to_owned());
-    }
-    let stop_date = if stop_time < start_time {
-        date.succ_opt()
-            .ok_or_else(|| "Date is out of range".to_owned())?
-    } else {
-        date
-    };
-    let started_at = local_naive_timestamp(NaiveDateTime::new(date, start_time))?;
-    let stopped_at = local_naive_timestamp(NaiveDateTime::new(stop_date, stop_time))?;
-    let duration = stopped_at - started_at;
-    if duration <= 0 || duration > 24 * 60 * 60 {
-        return Err("A time entry must be between 1 minute and 24 hours".to_owned());
-    }
-    Ok(TimeRange {
-        started_at: UnixSeconds(started_at),
-        stopped_at: UnixSeconds(stopped_at),
-    })
-}
-
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -1798,90 +1746,6 @@ mod tests {
                 .is_none_or(|project| project.0 < store.projects.len()));
             assert!(entry.time.stopped_at >= entry.time.started_at);
         }
-    }
-
-    #[test]
-    fn overnight_entry_is_split_between_local_days() {
-        let start = local_naive_timestamp(
-            NaiveDate::from_ymd_opt(2026, 9, 15)
-                .unwrap()
-                .and_hms_opt(23, 30, 0)
-                .unwrap(),
-        )
-        .unwrap();
-        let stop = local_naive_timestamp(
-            NaiveDate::from_ymd_opt(2026, 9, 16)
-                .unwrap()
-                .and_hms_opt(2, 20, 0)
-                .unwrap(),
-        )
-        .unwrap();
-        let mut totals = BTreeMap::new();
-        add_interval_to_days(&mut totals, start, stop);
-        assert_eq!(
-            totals[&NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()],
-            30 * 60
-        );
-        assert_eq!(
-            totals[&NaiveDate::from_ymd_opt(2026, 9, 16).unwrap()],
-            2 * 60 * 60 + 20 * 60
-        );
-    }
-
-    #[test]
-    fn inline_stop_time_before_start_is_the_following_day() {
-        let start = local_naive_timestamp(
-            NaiveDate::from_ymd_opt(2026, 9, 15)
-                .unwrap()
-                .and_hms_opt(23, 0, 0)
-                .unwrap(),
-        )
-        .unwrap();
-        let stop = local_naive_timestamp(
-            NaiveDate::from_ymd_opt(2026, 9, 16)
-                .unwrap()
-                .and_hms_opt(0, 2, 0)
-                .unwrap(),
-        )
-        .unwrap();
-        let edited = edited_time_range(
-            TimeRange {
-                started_at: UnixSeconds(start),
-                stopped_at: UnixSeconds(stop),
-            },
-            TimeEndpoint::Stop,
-            "02:20",
-        )
-        .unwrap();
-
-        assert_eq!(start_label(edited), "23:00");
-        assert_eq!(stop_label(edited), "02:20");
-        assert_eq!(edited.duration_seconds(), Some(3 * 60 * 60 + 20 * 60));
-    }
-
-    #[test]
-    fn unchanged_displayed_time_preserves_hidden_seconds() {
-        let start = local_naive_timestamp(
-            NaiveDate::from_ymd_opt(2026, 9, 16)
-                .unwrap()
-                .and_hms_opt(15, 2, 17)
-                .unwrap(),
-        )
-        .unwrap();
-        let stop = local_naive_timestamp(
-            NaiveDate::from_ymd_opt(2026, 9, 16)
-                .unwrap()
-                .and_hms_opt(15, 58, 43)
-                .unwrap(),
-        )
-        .unwrap();
-        let original = TimeRange {
-            started_at: UnixSeconds(start),
-            stopped_at: UnixSeconds(stop),
-        };
-
-        let edited = edited_time_range(original, TimeEndpoint::Start, "15:02").unwrap();
-        assert_eq!(edited, original);
     }
 
     #[test]

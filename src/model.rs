@@ -248,7 +248,7 @@ impl Store {
             .0
             .checked_add(MAX_ENTRY_SECONDS)
             .ok_or(ModelError::TimestampOutOfRange)?;
-        let capped_at_limit = elapsed > MAX_ENTRY_SECONDS;
+        let capped_at_limit = elapsed >= MAX_ENTRY_SECONDS;
         let stopped_at = UnixSeconds(now.0.min(deadline));
         let active = self.active_entry.take().expect("checked above");
         let entry_id = self.next_entry_id()?;
