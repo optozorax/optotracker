@@ -1,17 +1,32 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{DateTime, Local};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDate, NaiveDateTime,
+    NaiveTime, TimeZone, Timelike,
+};
 use eframe::egui::{
-    self, Align, Button, Color32, ComboBox, Frame, Layout, RichText, ScrollArea, Stroke,
+    self, Align, Align2, AtomExt, Button, Color32, ComboBox, FontData, FontDefinitions, FontFamily,
+    FontId, Frame, Layout, RichText, ScrollArea, Stroke,
 };
 
+mod app_icon;
+mod github_activity;
 #[path = "../clockify_model.rs"]
 mod model;
+mod settings;
+mod single_instance;
+mod tray;
+
+use github_activity::{ActivitySegment, GithubActivity};
 
 use model::{
-    ActiveTimeEntry, ActivityId, ProjectId, RgbColor, Store, TimeEntry, TimeRange, UnixSeconds,
+    ActiveTimeEntry, Activity, ActivityId, Project, ProjectId, ProjectStatus, RgbColor, Store,
+    TimeEntry, TimeRange, UnixSeconds,
 };
 
 const BLUE: Color32 = Color32::from_rgb(3, 169, 244);
@@ -19,56 +34,262 @@ const RED: Color32 = Color32::from_rgb(244, 67, 54);
 const PAGE: Color32 = Color32::from_rgb(242, 247, 250);
 const HEADER: Color32 = Color32::from_rgb(228, 236, 241);
 const BORDER: Color32 = Color32::from_rgb(218, 227, 232);
+const SELECTOR_HEIGHT: f32 = 30.0;
+const ENTRIES_PER_PAGE: usize = 100;
 
 fn main() -> eframe::Result {
-    let store_path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(default_store_path);
-
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Personal Time Tracker")
-            .with_inner_size([1200.0, 780.0])
-            .with_min_inner_size([760.0, 520.0]),
-        ..Default::default()
+    let _instance_guard = match single_instance::SingleInstanceGuard::acquire() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            single_instance::SingleInstanceGuard::show_already_running_message();
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(eframe::Error::AppCreation(Box::new(std::io::Error::other(
+                error,
+            ))));
+        }
     };
 
+    let mut start_minimized = false;
+    let mut source_store_path = None;
+    for argument in std::env::args_os().skip(1) {
+        if argument == "--minimized" {
+            start_minimized = true;
+        } else if source_store_path.is_none() {
+            source_store_path = Some(PathBuf::from(argument));
+        }
+    }
+    let source_store_path = source_store_path.unwrap_or_else(default_store_path);
+    let (store_path, startup_message) = match settings::prepare_data(&source_store_path) {
+        Ok(path) => (path, String::new()),
+        Err(error) => (source_store_path, error),
+    };
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("OptoTracker")
+            .with_icon(app_icon::icon_data(false))
+            .with_visible(!start_minimized)
+            .with_inner_size([1280.0, 820.0])
+            .with_min_inner_size([820.0, 560.0]),
+        persistence_path: Some(settings::persistence_path()),
+        ..Default::default()
+    };
     eframe::run_native(
-        "personal-time-tracker",
+        "OptoTracker",
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
-            Ok(Box::new(TimeTrackerApp::load(store_path.clone())))
+            configure_fonts(&cc.egui_ctx);
+            Ok(Box::new(TimeTrackerApp::load(
+                store_path.clone(),
+                startup_message.clone(),
+                cc.storage,
+                start_minimized,
+            )))
         }),
     )
+}
+
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let family = project_font_family();
+    let mut project_fonts = Vec::new();
+
+    for path in [
+        r"C:\Windows\Fonts\segoeuib.ttf",
+        r"C:\Windows\Fonts\arialbd.ttf",
+    ] {
+        if let Ok(bytes) = fs::read(path) {
+            let name = "project-bold".to_owned();
+            fonts.font_data.insert(
+                name.clone(),
+                std::sync::Arc::new(FontData::from_owned(bytes)),
+            );
+            project_fonts.push(name);
+            break;
+        }
+    }
+
+    if let Some(fallbacks) = fonts.families.get(&FontFamily::Proportional) {
+        project_fonts.extend(fallbacks.iter().cloned());
+    }
+    fonts.families.insert(family, project_fonts);
+    ctx.set_fonts(fonts);
+}
+
+fn project_font_family() -> FontFamily {
+    FontFamily::Name("ProjectBold".into())
+}
+
+fn project_font() -> FontId {
+    FontId::new(14.0, project_font_family())
+}
+
+fn project_text(text: impl Into<String>, text_color: Color32) -> RichText {
+    RichText::new(text.into())
+        .font(project_font())
+        .color(text_color)
+}
+
+fn total_label(ui: &mut egui::Ui, prefix: &str, seconds: u64, text_color: Color32) {
+    let mut text = egui::text::LayoutJob::default();
+    text.append(
+        prefix,
+        0.0,
+        egui::TextFormat {
+            font_id: FontId::new(14.0, FontFamily::Proportional),
+            color: text_color,
+            ..Default::default()
+        },
+    );
+    text.append(
+        &format_duration(seconds),
+        0.0,
+        egui::TextFormat {
+            font_id: project_font(),
+            color: text_color,
+            ..Default::default()
+        },
+    );
+    ui.label(text);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppView {
+    Entries,
+    Projects,
+    Activities,
+    Settings,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct PersistedSettings {
+    close_or_minimize_to_tray: bool,
+    start_minimized_on_autorun: bool,
+}
+
+impl Default for PersistedSettings {
+    fn default() -> Self {
+        Self {
+            close_or_minimize_to_tray: true,
+            start_minimized_on_autorun: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum TimeEndpoint {
+    Start,
+    Stop,
+}
+
+#[derive(Clone)]
+struct TimeEditRequest {
+    entry_index: usize,
+    endpoint: TimeEndpoint,
+    text: String,
+}
+
+struct ActivityOption {
+    id: ActivityId,
+    name: String,
+    total_seconds: u64,
+}
+
+struct ProjectOption {
+    id: ProjectId,
+    name: String,
+    color: Color32,
+    status: ProjectStatus,
+}
+
+#[derive(Clone, Default)]
+struct UsageStats {
+    entries: usize,
+    total_seconds: u64,
+    active_days: usize,
+    first_used: Option<i64>,
+    last_used: Option<i64>,
+    related_count: usize,
 }
 
 struct TimeTrackerApp {
     store_path: PathBuf,
     store: Store,
+    view: AppView,
     draft_activity: ActivityId,
     draft_project: Option<ProjectId>,
     message: String,
+    new_project_name: String,
+    new_project_color: [u8; 3],
+    new_activity_name: String,
+    time_edit_buffers: BTreeMap<(usize, TimeEndpoint), String>,
+    github_activity: GithubActivity,
+    entry_page: usize,
+    last_icon_running: Option<bool>,
+    tray: Option<tray::TrayController>,
+    exit_requested: bool,
+    window_hidden: bool,
+    preferences: PersistedSettings,
+    autorun_enabled: bool,
+    settings_message: String,
 }
 
 impl TimeTrackerApp {
-    fn load(store_path: PathBuf) -> Self {
-        match read_store(&store_path) {
-            Ok(store) => Self {
-                store_path,
-                store,
-                draft_activity: ActivityId(0),
-                draft_project: None,
-                message: String::new(),
-            },
-            Err(error) => Self {
-                store_path,
-                store: Store::default(),
-                draft_activity: ActivityId(0),
-                draft_project: None,
-                message: format!("Could not load data: {error}"),
-            },
+    fn load(
+        store_path: PathBuf,
+        startup_message: String,
+        storage: Option<&dyn eframe::Storage>,
+        start_minimized: bool,
+    ) -> Self {
+        let (store, load_message) = match read_store(&store_path) {
+            Ok(store) => (store, String::new()),
+            Err(error) => (Store::default(), format!("Could not load data: {error}")),
+        };
+        let message = if startup_message.is_empty() {
+            load_message
+        } else if load_message.is_empty() {
+            startup_message
+        } else {
+            format!("{startup_message}; {load_message}")
+        };
+        let draft_activity = ActivityId(store.activities.len().saturating_sub(1));
+        let running = store.active_entry.is_some();
+        let tray = tray::TrayController::new(running);
+        let preferences: PersistedSettings = storage
+            .and_then(|storage| eframe::get_value(storage, "opto_tracker_settings"))
+            .unwrap_or_default();
+        let message = match &tray {
+            Ok(_) => message,
+            Err(error) if message.is_empty() => format!("Could not create tray icon: {error}"),
+            Err(error) => format!("{message}; could not create tray icon: {error}"),
+        };
+        let autorun_enabled = settings::autorun_enabled();
+        if autorun_enabled {
+            let _ = settings::set_autorun(true, preferences.start_minimized_on_autorun);
+        }
+        Self {
+            store_path,
+            store,
+            view: AppView::Entries,
+            draft_activity,
+            draft_project: None,
+            message,
+            new_project_name: String::new(),
+            new_project_color: [104, 159, 56],
+            new_activity_name: String::new(),
+            time_edit_buffers: BTreeMap::new(),
+            github_activity: GithubActivity::default(),
+            entry_page: 0,
+            last_icon_running: None,
+            tray: tray.ok(),
+            exit_requested: false,
+            window_hidden: start_minimized,
+            preferences,
+            autorun_enabled,
+            settings_message: String::new(),
         }
     }
 
@@ -80,14 +301,25 @@ impl TimeTrackerApp {
     }
 
     fn start_timer(&mut self) {
-        if self.store.active_entry.is_some() || self.store.activities.is_empty() {
+        self.start_with(self.draft_activity, self.draft_project);
+    }
+
+    fn start_with(&mut self, activity: ActivityId, project: Option<ProjectId>) {
+        if self.store.active_entry.is_some() {
+            self.message = "Stop the current timer before starting another".to_owned();
+            return;
+        }
+        if activity.0 >= self.store.activities.len() {
+            self.message = "Create an activity before starting a timer".to_owned();
             return;
         }
         self.store.active_entry = Some(ActiveTimeEntry {
-            activity: self.draft_activity,
-            project: self.draft_project,
+            activity,
+            project,
             started_at: UnixSeconds(now()),
         });
+        self.draft_activity = activity;
+        self.draft_project = project;
         self.save();
     }
 
@@ -107,280 +339,951 @@ impl TimeTrackerApp {
         self.store
             .time_entries
             .sort_by_key(|entry| entry.time.started_at);
+        self.time_edit_buffers.clear();
         self.draft_activity = active.activity;
         self.draft_project = active.project;
         self.save();
     }
 
     fn timer_panel(&mut self, ui: &mut egui::Ui) {
-        let activity_names: Vec<String> = self
-            .store
-            .activities
-            .iter()
-            .map(|activity| activity.name.clone())
-            .collect();
-        let project_names: Vec<String> = self
-            .store
-            .projects
-            .iter()
-            .map(|project| project.name.clone())
-            .collect();
+        let activities = activity_options(&self.store);
+        let projects = project_options(&self.store);
         let mut active_changed = false;
-
+        let panel_width = ui.available_width();
         Frame::new()
             .fill(Color32::WHITE)
             .stroke(Stroke::new(1.0, BORDER))
             .inner_margin(18.0)
             .show(ui, |ui| {
+                ui.set_min_width((panel_width - 38.0).max(0.0));
                 ui.horizontal(|ui| {
                     ui.set_height(42.0);
-                    let available = (ui.available_width() - 420.0).max(180.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(available, 42.0),
-                        Layout::left_to_right(Align::Center),
-                        |ui| {
-                            if let Some(active) = self.store.active_entry.as_mut() {
-                                active_changed |= activity_combo(
-                                    ui,
-                                    "active-activity",
-                                    &mut active.activity,
-                                    &activity_names,
-                                );
-                            } else {
-                                activity_combo(
-                                    ui,
-                                    "draft-activity",
-                                    &mut self.draft_activity,
-                                    &activity_names,
-                                );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let started_at = self
+                            .store
+                            .active_entry
+                            .as_ref()
+                            .map(|active| active.started_at.0);
+                        let elapsed = started_at
+                            .map(|started_at| now().saturating_sub(started_at) as u64)
+                            .unwrap_or(0);
+                        if started_at.is_some() {
+                            if ui
+                                .add_sized(
+                                    [90.0, 36.0],
+                                    Button::new(RichText::new("STOP").color(Color32::WHITE))
+                                        .fill(RED),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                self.stop_timer();
                             }
-                        },
-                    );
-
-                    let project = self
-                        .store
-                        .active_entry
-                        .as_mut()
-                        .map(|entry| &mut entry.project)
-                        .unwrap_or(&mut self.draft_project);
-                    let project_changed =
-                        project_combo(ui, "timer-project", project, &project_names);
-                    active_changed |= self.store.active_entry.is_some() && project_changed;
-
-                    ui.separator();
-                    if let Some(active) = &self.store.active_entry {
-                        let elapsed = now().saturating_sub(active.started_at.0) as u64;
-                        ui.label(RichText::new(format_duration(elapsed)).size(20.0).strong());
-                        if ui
-                            .add_sized(
-                                [90.0, 36.0],
-                                Button::new(RichText::new("STOP").color(Color32::WHITE)).fill(RED),
-                            )
-                            .clicked()
-                        {
-                            self.stop_timer();
+                            ui.ctx().request_repaint_after(Duration::from_secs(1));
+                        } else {
+                            if ui
+                                .add_enabled(
+                                    !activities.is_empty(),
+                                    Button::new(RichText::new("START").color(Color32::WHITE))
+                                        .fill(BLUE)
+                                        .min_size(egui::vec2(90.0, 36.0)),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                self.start_timer();
+                            }
                         }
-                        ui.ctx().request_repaint_after(Duration::from_secs(1));
-                    } else if ui
-                        .add_enabled(
-                            !activity_names.is_empty(),
-                            Button::new(RichText::new("START").color(Color32::WHITE))
-                                .fill(BLUE)
-                                .min_size(egui::vec2(90.0, 36.0)),
-                        )
-                        .clicked()
-                    {
-                        self.start_timer();
-                    }
+                        ui.add_sized(
+                            [105.0, 42.0],
+                            egui::Label::new(
+                                RichText::new(format_duration(elapsed)).size(20.0).strong(),
+                            ),
+                        );
+
+                        ui.separator();
+                        let selector_width = 220.0 + 190.0 + ui.spacing().item_spacing.x;
+                        ui.add_space((ui.available_width() - selector_width).max(0.0));
+
+                        let project = self
+                            .store
+                            .active_entry
+                            .as_mut()
+                            .map(|entry| &mut entry.project)
+                            .unwrap_or(&mut self.draft_project);
+                        let project_changed =
+                            project_combo(ui, "timer-project", project, &projects);
+                        active_changed |= self.store.active_entry.is_some() && project_changed;
+
+                        if let Some(active) = self.store.active_entry.as_mut() {
+                            active_changed |= activity_combo(
+                                ui,
+                                "active-activity",
+                                &mut active.activity,
+                                &activities,
+                            );
+                        } else {
+                            activity_combo(
+                                ui,
+                                "draft-activity",
+                                &mut self.draft_activity,
+                                &activities,
+                            );
+                        }
+                    });
                 });
             });
-
         if active_changed {
             self.save();
         }
     }
 
     fn entries_panel(&mut self, ui: &mut egui::Ui) {
-        let activity_names: Vec<String> = self
-            .store
-            .activities
-            .iter()
-            .map(|activity| activity.name.clone())
-            .collect();
-        let project_names: Vec<String> = self
-            .store
-            .projects
-            .iter()
-            .map(|project| project.name.clone())
-            .collect();
-        let project_colors: Vec<Color32> = self
-            .store
-            .projects
-            .iter()
-            .map(|project| color(project.color))
-            .collect();
+        let entry_count = self.store.time_entries.len();
+        let page_count = entry_count.div_ceil(ENTRIES_PER_PAGE).max(1);
+        self.entry_page = self.entry_page.min(page_count - 1);
 
+        let activities = activity_options(&self.store);
+        let projects = project_options(&self.store);
+        let day_totals = totals_by_local_day(&self.store, now());
+        let project_segments: BTreeMap<NaiveDate, Vec<ActivitySegment>> =
+            project_totals_by_local_day(&self.store, now())
+                .into_iter()
+                .map(|(date, contributions)| {
+                    let segments = contributions
+                        .into_iter()
+                        .filter(|(_, seconds)| *seconds > 0)
+                        .map(|(project, seconds)| {
+                            let (label, segment_color) = project
+                                .and_then(|index| self.store.projects.get(index))
+                                .map(|project| (project.name.clone(), color(project.color)))
+                                .unwrap_or_else(|| {
+                                    ("No project".to_owned(), Color32::from_gray(125))
+                                });
+                            ActivitySegment {
+                                label,
+                                detail: format_duration(seconds),
+                                color: segment_color,
+                                weight: seconds as f32,
+                            }
+                        })
+                        .collect();
+                    (date, segments)
+                })
+                .collect();
+        let week_totals = totals_by_week(&day_totals);
+        let today = Local::now().date_naive();
+        let this_week = week_start(today);
         let mut changed = false;
         let mut delete = None;
-        let mut current_day: Option<String> = None;
-        let mut shown = 0usize;
+        let mut start_request = None;
+        let mut time_commits = Vec::new();
+        let mut current_week: Option<NaiveDate> = None;
+        let can_start = self.store.active_entry.is_none();
+        let mut entries_by_day: BTreeMap<NaiveDate, Vec<usize>> = BTreeMap::new();
+        let page_start = self.entry_page * ENTRIES_PER_PAGE;
+        for index in (0..self.store.time_entries.len())
+            .rev()
+            .skip(page_start)
+            .take(ENTRIES_PER_PAGE)
+        {
+            let entry = &self.store.time_entries[index];
+            let date = local_datetime(entry.time.started_at.0).date_naive();
+            entries_by_day.entry(date).or_default().push(index);
+            let mut split = BTreeMap::new();
+            add_interval_to_days(&mut split, entry.time.started_at.0, entry.time.stopped_at.0);
+            for date in split.into_keys() {
+                entries_by_day.entry(date).or_default();
+            }
+        }
+        let display_days: Vec<NaiveDate> = entries_by_day.keys().copied().rev().collect();
 
         ScrollArea::vertical()
             .auto_shrink([false, false])
+            .scroll_bar_visibility(
+                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
+            )
             .show(ui, |ui| {
-                for index in (0..self.store.time_entries.len()).rev() {
-                    if shown == 250 {
-                        break;
-                    }
-                    shown += 1;
-                    let entry = &mut self.store.time_entries[index];
-                    let day = local_datetime(entry.time.started_at.0)
-                        .format("%A, %B %-d, %Y")
-                        .to_string();
-
-                    if current_day.as_deref() != Some(day.as_str()) {
-                        current_day = Some(day.clone());
-                        ui.add_space(12.0);
-                        Frame::new()
-                            .fill(HEADER)
-                            .inner_margin(egui::Margin::symmetric(14, 9))
-                            .show(ui, |ui| {
-                                ui.label(RichText::new(day).color(Color32::from_gray(95)).strong());
+                let activity_width = ui.available_width();
+                Frame::new()
+                    .fill(Color32::WHITE)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .inner_margin(14.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width((activity_width - 30.0).max(0.0));
+                        ui.horizontal(|ui| {
+                            ui.heading("Activity");
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                self.github_activity.color_controls(ui);
                             });
-                    }
+                        });
+                        self.github_activity.ui(
+                            ui,
+                            &day_totals,
+                            &project_segments,
+                            today,
+                            |seconds| seconds as f32 / (8.0 * 60.0 * 60.0),
+                            format_duration,
+                        );
+                    });
+                ui.add_space(12.0);
+                pagination_controls(ui, &mut self.entry_page, entry_count);
 
+                for date in display_days {
+                    let entry_week = week_start(date);
+                    if current_week != Some(entry_week) {
+                        current_week = Some(entry_week);
+                        ui.add_space(18.0);
+                        ui.horizontal(|ui| {
+                            ui.heading(week_title(entry_week, this_week));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                total_label(
+                                    ui,
+                                    "Week total: ",
+                                    week_totals.get(&entry_week).copied().unwrap_or(0),
+                                    ui.visuals().text_color(),
+                                );
+                            });
+                        });
+                    }
+                    ui.add_space(8.0);
                     Frame::new()
-                        .fill(Color32::WHITE)
-                        .stroke(Stroke::new(1.0, BORDER))
-                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .fill(HEADER)
+                        .inner_margin(egui::Margin::symmetric(14, 9))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                changed |= activity_combo(
-                                    ui,
-                                    ("entry-activity", index),
-                                    &mut entry.activity,
-                                    &activity_names,
-                                );
-
-                                if let Some(project) = entry.project {
-                                    ui.colored_label(
-                                        project_colors.get(project.0).copied().unwrap_or(BLUE),
-                                        "●",
-                                    );
-                                } else {
-                                    ui.label("○");
-                                }
-                                changed |= project_combo(
-                                    ui,
-                                    ("entry-project", index),
-                                    &mut entry.project,
-                                    &project_names,
-                                );
-
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Delete").clicked() {
-                                        delete = Some(index);
-                                    }
-                                    ui.separator();
-                                    ui.label(
-                                        RichText::new(format_duration(
-                                            entry.time.duration_seconds().unwrap_or(0),
-                                        ))
-                                        .size(18.0)
+                                ui.label(
+                                    RichText::new(day_title(date, today))
+                                        .color(Color32::from_gray(90))
                                         .strong(),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    total_label(
+                                        ui,
+                                        "Day total: ",
+                                        day_totals.get(&date).copied().unwrap_or(0),
+                                        Color32::from_gray(90),
                                     );
-                                    ui.label(format!(
-                                        "{} – {}",
-                                        local_datetime(entry.time.started_at.0).format("%H:%M"),
-                                        local_datetime(entry.time.stopped_at.0).format("%H:%M")
-                                    ));
                                 });
                             });
                         });
+                    let indices = entries_by_day.get(&date).cloned().unwrap_or_default();
+                    if indices.is_empty() {
+                        Frame::new()
+                            .fill(Color32::WHITE)
+                            .stroke(Stroke::new(1.0, BORDER))
+                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("Time carried over from an overnight entry")
+                                        .color(Color32::from_gray(115)),
+                                );
+                            });
+                    }
+                    for index in indices {
+                        let entry = &mut self.store.time_entries[index];
+                        Frame::new()
+                            .fill(Color32::WHITE)
+                            .stroke(Stroke::new(1.0, BORDER))
+                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .show(ui, |ui| {
+                                // Establish the final row height before egui places the first
+                                // widget. Otherwise these selectors are positioned before the
+                                // taller icon buttons on the right enlarge the row.
+                                ui.set_height(SELECTOR_HEIGHT);
+                                ui.horizontal(|ui| {
+                                    changed |= activity_combo(
+                                        ui,
+                                        ("entry-activity", index),
+                                        &mut entry.activity,
+                                        &activities,
+                                    );
+                                    changed |= project_combo(
+                                        ui,
+                                        ("entry-project", index),
+                                        &mut entry.project,
+                                        &projects,
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if cross_icon_button(ui) {
+                                            delete = Some(index);
+                                        }
+                                        if play_icon_button(ui, can_start) {
+                                            start_request = Some((entry.activity, entry.project));
+                                        }
+                                        ui.separator();
+                                        ui.label(
+                                            RichText::new(format_duration(
+                                                entry.time.duration_seconds().unwrap_or(0),
+                                            ))
+                                            .size(18.0)
+                                            .strong(),
+                                        );
+                                        if let Some(edit) = inline_time_field(
+                                            ui,
+                                            &mut self.time_edit_buffers,
+                                            index,
+                                            TimeEndpoint::Stop,
+                                            stop_label(entry.time),
+                                        ) {
+                                            time_commits.push(edit);
+                                        }
+                                        ui.label("-");
+                                        if let Some(edit) = inline_time_field(
+                                            ui,
+                                            &mut self.time_edit_buffers,
+                                            index,
+                                            TimeEndpoint::Start,
+                                            start_label(entry.time),
+                                        ) {
+                                            time_commits.push(edit);
+                                        }
+                                    });
+                                });
+                            });
+                    }
                 }
-            });
 
+                ui.add_space(16.0);
+                pagination_controls(ui, &mut self.entry_page, entry_count);
+            });
         if let Some(index) = delete {
             self.store.time_entries.remove(index);
+            self.time_edit_buffers.clear();
             changed = true;
         }
         if changed {
             self.save();
         }
+        for edit in time_commits {
+            self.apply_inline_time_edit(edit);
+        }
+        if let Some((activity, project)) = start_request {
+            self.start_with(activity, project);
+        }
+    }
+
+    fn apply_inline_time_edit(&mut self, edit: TimeEditRequest) {
+        let result = self
+            .store
+            .time_entries
+            .get(edit.entry_index)
+            .cloned()
+            .ok_or_else(|| "The entry no longer exists".to_owned())
+            .and_then(|entry| edited_time_range(entry.time, edit.endpoint, &edit.text));
+        match result {
+            Ok(time) => {
+                if let Some(entry) = self.store.time_entries.get_mut(edit.entry_index) {
+                    entry.time = time;
+                    self.store
+                        .time_entries
+                        .sort_by_key(|entry| entry.time.started_at);
+                    self.time_edit_buffers.clear();
+                    self.save();
+                }
+            }
+            Err(error) => {
+                self.message = error;
+                self.time_edit_buffers
+                    .remove(&(edit.entry_index, edit.endpoint));
+            }
+        }
+    }
+
+    fn projects_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Projects");
+            ui.label(
+                RichText::new(format!("{} projects", self.store.projects.len()))
+                    .color(Color32::from_gray(110)),
+            );
+        });
+        ui.label(
+            "Rename projects, change their color or finish them. Vector order remains stable.",
+        );
+        ui.add_space(12.0);
+        let mut add_clicked = false;
+        let add_row_width = ui.available_width();
+        Frame::new()
+            .fill(Color32::WHITE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .inner_margin(14.0)
+            .show(ui, |ui| {
+                ui.set_min_width((add_row_width - 30.0).max(0.0));
+                ui.horizontal(|ui| {
+                    ui.label("New project");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_project_name).desired_width(220.0),
+                    );
+                    ui.color_edit_button_srgb(&mut self.new_project_color)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    add_clicked = ui
+                        .button("Add")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
+                });
+            });
+        if add_clicked {
+            let name = self.new_project_name.trim();
+            if name.is_empty() {
+                self.message = "Project name cannot be empty".to_owned();
+            } else {
+                self.store.projects.push(Project {
+                    name: name.to_owned(),
+                    color: RgbColor {
+                        red: self.new_project_color[0],
+                        green: self.new_project_color[1],
+                        blue: self.new_project_color[2],
+                    },
+                    status: ProjectStatus::Active,
+                });
+                self.draft_project = Some(ProjectId(self.store.projects.len() - 1));
+                self.new_project_name.clear();
+                self.save();
+            }
+        }
+
+        let stats: Vec<UsageStats> = (0..self.store.projects.len())
+            .map(|index| project_stats(&self.store, ProjectId(index)))
+            .collect();
+        let mut changed = false;
+        ui.add_space(12.0);
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(
+                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
+            )
+            .show(ui, |ui| {
+                for index in (0..self.store.projects.len()).rev() {
+                    let project = &mut self.store.projects[index];
+                    let stats = &stats[index];
+                    let row_width = ui.available_width();
+                    Frame::new()
+                        .fill(Color32::WHITE)
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .inner_margin(14.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width((row_width - 30.0).max(0.0));
+                            ui.horizontal(|ui| {
+                                let mut rgb =
+                                    [project.color.red, project.color.green, project.color.blue];
+                                if ui
+                                    .color_edit_button_srgb(&mut rgb)
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .changed()
+                                {
+                                    project.color = RgbColor {
+                                        red: rgb[0],
+                                        green: rgb[1],
+                                        blue: rgb[2],
+                                    };
+                                    changed = true;
+                                }
+                                changed |= ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut project.name)
+                                            .desired_width(260.0)
+                                            .font(project_font())
+                                            .text_color(color(project.color)),
+                                    )
+                                    .changed();
+                                changed |= project_status_combo(ui, index, &mut project.status);
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                stat_label(ui, "Total", format_stat_duration(stats.total_seconds));
+                                stat_label(ui, "Entries", stats.entries.to_string());
+                                stat_label(ui, "Active days", stats.active_days.to_string());
+                                stat_label(ui, "First used", format_stat_date(stats.first_used));
+                                stat_label(ui, "Last used", format_stat_date(stats.last_used));
+                                stat_label(ui, "Activities", stats.related_count.to_string());
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
+            });
+        if changed {
+            self.save();
+        }
+    }
+
+    fn activities_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Activities");
+            ui.label(
+                RichText::new(format!("{} activities", self.store.activities.len()))
+                    .color(Color32::from_gray(110)),
+            );
+        });
+        ui.label("Activity IDs stay stable while names can be edited.");
+        ui.add_space(12.0);
+        let mut add_clicked = false;
+        let add_row_width = ui.available_width();
+        Frame::new()
+            .fill(Color32::WHITE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .inner_margin(14.0)
+            .show(ui, |ui| {
+                ui.set_min_width((add_row_width - 30.0).max(0.0));
+                ui.horizontal(|ui| {
+                    ui.label("New activity");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_activity_name)
+                            .desired_width(260.0),
+                    );
+                    add_clicked = ui
+                        .button("Add")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked();
+                });
+            });
+        if add_clicked {
+            let name = self.new_activity_name.trim();
+            if name.is_empty() {
+                self.message = "Activity name cannot be empty".to_owned();
+            } else {
+                self.store.activities.push(Activity {
+                    name: name.to_owned(),
+                });
+                self.draft_activity = ActivityId(self.store.activities.len() - 1);
+                self.new_activity_name.clear();
+                self.save();
+            }
+        }
+
+        let stats: Vec<UsageStats> = (0..self.store.activities.len())
+            .map(|index| activity_stats(&self.store, ActivityId(index)))
+            .collect();
+        let mut activity_order: Vec<usize> = (0..self.store.activities.len()).collect();
+        activity_order.sort_by(|left, right| {
+            stats[*right]
+                .total_seconds
+                .cmp(&stats[*left].total_seconds)
+                .then_with(|| right.cmp(left))
+        });
+        let mut changed = false;
+        ui.add_space(12.0);
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(
+                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
+            )
+            .show(ui, |ui| {
+                for index in activity_order {
+                    let activity = &mut self.store.activities[index];
+                    let stats = &stats[index];
+                    let row_width = ui.available_width();
+                    Frame::new()
+                        .fill(Color32::WHITE)
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .inner_margin(14.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width((row_width - 30.0).max(0.0));
+                            changed |= ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut activity.name)
+                                        .desired_width(300.0),
+                                )
+                                .changed();
+                            ui.horizontal_wrapped(|ui| {
+                                stat_label(ui, "Total", format_stat_duration(stats.total_seconds));
+                                stat_label(ui, "Entries", stats.entries.to_string());
+                                stat_label(ui, "Active days", stats.active_days.to_string());
+                                stat_label(ui, "First used", format_stat_date(stats.first_used));
+                                stat_label(ui, "Last used", format_stat_date(stats.last_used));
+                                stat_label(ui, "Projects", stats.related_count.to_string());
+                            });
+                        });
+                    ui.add_space(8.0);
+                }
+            });
+        if changed {
+            self.save();
+        }
+    }
+
+    fn settings_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Installation, storage and Windows startup behavior.")
+                .color(Color32::from_gray(95)),
+        );
+        if !self.settings_message.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(&self.settings_message).color(BLUE));
+        }
+        ui.add_space(18.0);
+
+        let width = ui.available_width();
+        Frame::new()
+            .fill(Color32::WHITE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .inner_margin(18.0)
+            .show(ui, |ui| {
+                ui.set_min_width((width - 38.0).max(0.0));
+                ui.heading("Application folder");
+                ui.label(
+                    RichText::new(settings::app_directory().display().to_string()).monospace(),
+                );
+                ui.label(
+                    RichText::new(
+                        "Tracker data and UI persistence are stored directly in this folder.",
+                    )
+                    .color(Color32::from_gray(105)),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if settings::is_installed() {
+                            "Update installed app"
+                        } else {
+                            "Install OptoTracker here"
+                        })
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        match settings::install_current_executable() {
+                            Ok(_) => {
+                                self.settings_message = "OptoTracker was installed.".to_owned();
+                                if self.autorun_enabled {
+                                    if let Err(error) = settings::set_autorun(
+                                        true,
+                                        self.preferences.start_minimized_on_autorun,
+                                    ) {
+                                        self.settings_message = error;
+                                    }
+                                }
+                            }
+                            Err(error) => self.settings_message = error,
+                        }
+                    }
+                    if ui
+                        .button("Open folder")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        if let Err(error) = settings::open_app_directory() {
+                            self.settings_message = error;
+                        }
+                    }
+                    if ui
+                        .button("Create desktop shortcut")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        match settings::create_desktop_shortcut() {
+                            Ok(()) => {
+                                self.settings_message = "Desktop shortcut created.".to_owned();
+                            }
+                            Err(error) => self.settings_message = error,
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                if settings::is_installed() {
+                    ui.horizontal(|ui| {
+                        ui.label("Installed executable:");
+                        ui.label(RichText::new(settings::EXECUTABLE_FILE).monospace());
+                    });
+                } else {
+                    ui.label("OptoTracker is not installed in this folder yet.");
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Data:");
+                    ui.label(RichText::new(settings::DATA_FILE).monospace());
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Persistence:");
+                    ui.label(RichText::new(settings::PERSISTENCE_FILE).monospace());
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Weekly backups:");
+                    ui.label(RichText::new("backups").monospace());
+                });
+            });
+
+        ui.add_space(14.0);
+        Frame::new()
+            .fill(Color32::WHITE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .inner_margin(18.0)
+            .show(ui, |ui| {
+                ui.set_min_width((width - 38.0).max(0.0));
+                ui.heading("Windows behavior");
+                ui.add_space(8.0);
+
+                let mut autorun = self.autorun_enabled;
+                if ui
+                    .checkbox(&mut autorun, "Start OptoTracker when I sign in")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .changed()
+                {
+                    let result = if autorun {
+                        settings::install_current_executable().and_then(|_| {
+                            settings::set_autorun(true, self.preferences.start_minimized_on_autorun)
+                        })
+                    } else {
+                        settings::set_autorun(false, false)
+                    };
+                    match result {
+                        Ok(()) => {
+                            self.autorun_enabled = autorun;
+                            self.settings_message = if autorun {
+                                "Windows autorun enabled.".to_owned()
+                            } else {
+                                "Windows autorun disabled".to_owned()
+                            };
+                        }
+                        Err(error) => self.settings_message = error,
+                    }
+                }
+                let minimized_changed = ui
+                    .checkbox(
+                        &mut self.preferences.start_minimized_on_autorun,
+                        "Start minimized to tray on autorun",
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .changed();
+                if minimized_changed && self.autorun_enabled {
+                    match settings::set_autorun(true, self.preferences.start_minimized_on_autorun) {
+                        Ok(()) => {
+                            self.settings_message = "Autorun behavior updated.".to_owned();
+                        }
+                        Err(error) => self.settings_message = error,
+                    }
+                }
+
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut self.preferences.close_or_minimize_to_tray,
+                    "Send OptoTracker to the tray when closed or minimized",
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.label(
+                    RichText::new(
+                        "When disabled, minimizing behaves normally and closing exits the app.",
+                    )
+                    .small()
+                    .color(Color32::from_gray(105)),
+                );
+            });
+    }
+
+    fn handle_window_and_tray(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(Duration::from_millis(200));
+        if let Some(action) = self.tray.as_ref().and_then(|tray| tray.poll_action()) {
+            match action {
+                tray::TrayAction::Show => {
+                    self.window_hidden = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                tray::TrayAction::Exit => {
+                    self.exit_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+
+        let (close_requested, minimized) = ctx.input(|input| {
+            (
+                input.viewport().close_requested(),
+                input.viewport().minimized == Some(true),
+            )
+        });
+        if self.preferences.close_or_minimize_to_tray && !self.exit_requested {
+            if close_requested {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_hidden = true;
+            } else if minimized && !self.window_hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.window_hidden = true;
+            }
+        }
     }
 }
 
 impl eframe::App for TimeTrackerApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_window_and_tray(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let running = self.store.active_entry.is_some();
+        if self.last_icon_running != Some(running) {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(
+                    app_icon::icon_data(running),
+                ))));
+            app_icon::set_taskbar_running(frame, running);
+            if let Some(tray) = &self.tray {
+                if let Err(error) = tray.set_running(running) {
+                    self.message = format!("Could not update tray icon: {error}");
+                }
+            }
+            self.last_icon_running = Some(running);
+        }
+
         egui::Panel::top("top-bar")
             .exact_size(58.0)
             .frame(Frame::new().fill(Color32::WHITE).inner_margin(14.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("◷").size(26.0).color(BLUE));
-                    ui.label(RichText::new("personal tracker").size(24.0).strong());
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+                    app_icon::paint(ui.painter(), icon_rect, running);
+                    ui.label(RichText::new("OptoTracker").size(24.0).strong());
+                    ui.add_space(20.0);
+                    ui.selectable_value(&mut self.view, AppView::Entries, "Time entries")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    ui.selectable_value(&mut self.view, AppView::Projects, "Projects")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    ui.selectable_value(&mut self.view, AppView::Activities, "Activities")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    ui.selectable_value(&mut self.view, AppView::Settings, "Settings")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if !self.message.is_empty() {
                             ui.label(RichText::new(&self.message).color(Color32::from_gray(110)));
                         }
-                        ui.label(
-                            RichText::new(self.store_path.display().to_string())
-                                .small()
-                                .color(Color32::from_gray(130)),
-                        );
                     });
                 });
             });
-
-        egui::Panel::left("sidebar")
-            .exact_size(190.0)
-            .frame(Frame::new().fill(Color32::WHITE).inner_margin(18.0))
-            .show(ui, |ui| {
-                ui.add_space(8.0);
-                ui.label(RichText::new("TIME TRACKER").color(BLUE).strong());
-                ui.add_space(24.0);
-                ui.label(RichText::new("DATA").small().color(Color32::from_gray(145)));
-                ui.add_space(10.0);
-                ui.label(format!("{} entries", self.store.time_entries.len()));
-                ui.label(format!("{} projects", self.store.projects.len()));
-                ui.label(format!("{} activities", self.store.activities.len()));
-            });
-
         egui::CentralPanel::default()
             .frame(Frame::new().fill(PAGE).inner_margin(24.0))
             .show(ui, |ui| {
-                self.timer_panel(ui);
-                ui.add_space(26.0);
-                ui.heading("Recent entries");
-                ui.label(
-                    RichText::new("The newest 250 entries are shown.")
-                        .small()
-                        .color(Color32::from_gray(120)),
-                );
-                self.entries_panel(ui);
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                match self.view {
+                    AppView::Entries => {
+                        ui.horizontal(|ui| {
+                            ui.heading("Time entries");
+                            ui.label(
+                                RichText::new(format!("{} entries", self.store.time_entries.len()))
+                                    .color(Color32::from_gray(110)),
+                            );
+                        });
+                        ui.add_space(12.0);
+                        self.timer_panel(ui);
+                        ui.add_space(18.0);
+                        self.entries_panel(ui);
+                    }
+                    AppView::Projects => self.projects_panel(ui),
+                    AppView::Activities => self.activities_panel(ui),
+                    AppView::Settings => self.settings_panel(ui),
+                }
             });
     }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, "opto_tracker_settings", &self.preferences);
+    }
+
+    fn auto_save_interval(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+}
+
+fn pagination_controls(ui: &mut egui::Ui, page: &mut usize, total_entries: usize) {
+    let page_count = total_entries.div_ceil(ENTRIES_PER_PAGE).max(1);
+    *page = (*page).min(page_count - 1);
+    let first = if total_entries == 0 {
+        0
+    } else {
+        *page * ENTRIES_PER_PAGE + 1
+    };
+    let last = ((*page + 1) * ENTRIES_PER_PAGE).min(total_entries);
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("Showing {first}-{last} of {total_entries}"))
+                .color(Color32::from_gray(105)),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add_enabled(*page + 1 < page_count, Button::new("Next"))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                *page += 1;
+            }
+            ui.label(format!("Page {} of {page_count}", *page + 1));
+            if ui
+                .add_enabled(*page > 0, Button::new("Previous"))
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                *page -= 1;
+            }
+        });
+    });
+}
+
+fn activity_options(store: &Store) -> Vec<ActivityOption> {
+    let mut totals = vec![0_u64; store.activities.len()];
+    for (activity, _, start, stop) in usage_intervals(store) {
+        if let Some(total) = totals.get_mut(activity.0) {
+            *total += stop.saturating_sub(start) as u64;
+        }
+    }
+    let mut options: Vec<_> = store
+        .activities
+        .iter()
+        .enumerate()
+        .map(|(index, activity)| ActivityOption {
+            id: ActivityId(index),
+            name: activity.name.clone(),
+            total_seconds: totals[index],
+        })
+        .collect();
+    options.sort_by(|left, right| {
+        right
+            .total_seconds
+            .cmp(&left.total_seconds)
+            .then_with(|| right.id.0.cmp(&left.id.0))
+    });
+    options
+}
+
+fn project_options(store: &Store) -> Vec<ProjectOption> {
+    store
+        .projects
+        .iter()
+        .enumerate()
+        .map(|(index, project)| ProjectOption {
+            id: ProjectId(index),
+            name: project.name.clone(),
+            color: color(project.color),
+            status: project.status,
+        })
+        .collect()
 }
 
 fn activity_combo(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     value: &mut ActivityId,
-    names: &[String],
+    activities: &[ActivityOption],
 ) -> bool {
     let before = *value;
-    let selected = names
-        .get(value.0)
-        .map(String::as_str)
+    let selected = activities
+        .iter()
+        .find(|activity| activity.id == *value)
+        .map(|activity| activity.name.as_str())
         .unwrap_or("Choose activity");
-    ComboBox::from_id_salt(id)
-        .selected_text(selected)
-        .width(220.0)
-        .show_ui(ui, |ui| {
-            for (index, name) in names.iter().enumerate() {
-                ui.selectable_value(value, ActivityId(index), name);
+    invisible_combo(
+        ui,
+        id,
+        RichText::new(selected).color(Color32::from_gray(30)),
+        220.0,
+        |ui| {
+            for activity in activities {
+                ui.selectable_value(value, activity.id, &activity.name);
             }
-        });
+        },
+    );
     *value != before
 }
 
@@ -388,23 +1291,472 @@ fn project_combo(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     value: &mut Option<ProjectId>,
-    names: &[String],
+    projects: &[ProjectOption],
 ) -> bool {
     let before = *value;
     let selected = value
-        .and_then(|id| names.get(id.0))
-        .map(String::as_str)
-        .unwrap_or("No project");
-    ComboBox::from_id_salt(id)
-        .selected_text(selected)
-        .width(190.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(value, None, "No project");
-            for (index, name) in names.iter().enumerate() {
-                ui.selectable_value(value, Some(ProjectId(index)), name);
+        .and_then(|id| projects.iter().find(|project| project.id == id))
+        .map(|project| project_text(&project.name, project.color))
+        .unwrap_or_else(|| project_text("No project", Color32::from_gray(110)));
+    invisible_combo(ui, id, selected, 190.0, |ui| {
+        for project in projects
+            .iter()
+            .rev()
+            .filter(|project| project.status == ProjectStatus::Active)
+        {
+            ui.selectable_value(
+                value,
+                Some(project.id),
+                project_text(&project.name, project.color),
+            );
+        }
+        if projects
+            .iter()
+            .any(|project| project.status == ProjectStatus::Finished)
+        {
+            ui.separator();
+            for project in projects
+                .iter()
+                .rev()
+                .filter(|project| project.status == ProjectStatus::Finished)
+            {
+                ui.selectable_value(
+                    value,
+                    Some(project.id),
+                    project_text(&project.name, project.color),
+                );
             }
-        });
+        }
+        ui.separator();
+        ui.selectable_value(
+            value,
+            None,
+            project_text("No project", Color32::from_gray(110)),
+        );
+    });
     *value != before
+}
+
+fn invisible_combo(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    selected: RichText,
+    width: f32,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    ui.push_id(id, |ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, SELECTOR_HEIGHT),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                let button = Button::new(selected.atom_grow(true).atom_align(Align2::LEFT_CENTER))
+                    .frame(false)
+                    .min_size(egui::vec2(width, SELECTOR_HEIGHT));
+                let (response, _) =
+                    egui::containers::menu::MenuButton::from_button(button).ui(ui, contents);
+                response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            },
+        );
+    });
+}
+
+fn bright_combo<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        for visuals in [
+            &mut widgets.inactive,
+            &mut widgets.hovered,
+            &mut widgets.active,
+            &mut widgets.open,
+        ] {
+            visuals.bg_fill = Color32::WHITE;
+            visuals.weak_bg_fill = Color32::WHITE;
+            visuals.bg_stroke = Stroke::new(1.0, Color32::from_rgb(168, 192, 202));
+            visuals.fg_stroke = Stroke::new(1.5, Color32::from_rgb(45, 142, 184));
+        }
+        add(ui)
+    })
+    .inner
+}
+
+fn play_icon_button(ui: &mut egui::Ui, enabled: bool) -> bool {
+    let response = ui.add_enabled(
+        enabled,
+        Button::new("")
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .min_size(egui::vec2(30.0, 26.0)),
+    );
+    let response = if enabled {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+    let fill = if !enabled {
+        Color32::from_gray(210)
+    } else if response.is_pointer_button_down_on() {
+        Color32::from_rgb(46, 125, 50)
+    } else if response.hovered() {
+        Color32::from_rgb(67, 160, 71)
+    } else {
+        Color32::from_rgb(76, 175, 80)
+    };
+    ui.painter()
+        .rect_filled(response.rect, egui::CornerRadius::same(3), fill);
+    let center = response.rect.center();
+    let icon_color = if enabled {
+        Color32::WHITE
+    } else {
+        Color32::from_gray(145)
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(center.x - 4.0, center.y - 7.0),
+            egui::pos2(center.x - 4.0, center.y + 7.0),
+            egui::pos2(center.x + 7.0, center.y),
+        ],
+        icon_color,
+        Stroke::NONE,
+    ));
+    response.clicked()
+}
+
+fn cross_icon_button(ui: &mut egui::Ui) -> bool {
+    let response = ui
+        .add(
+            Button::new("")
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::NONE)
+                .min_size(egui::vec2(30.0, 26.0)),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = if response.is_pointer_button_down_on() {
+        Color32::from_rgb(244, 190, 190)
+    } else if response.hovered() {
+        Color32::from_rgb(255, 224, 224)
+    } else {
+        Color32::from_rgb(255, 243, 243)
+    };
+    ui.painter()
+        .rect_filled(response.rect, egui::CornerRadius::same(3), fill);
+    let center = response.rect.center();
+    let stroke = Stroke::new(1.8, Color32::from_rgb(198, 65, 65));
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 5.0, center.y - 5.0),
+            egui::pos2(center.x + 5.0, center.y + 5.0),
+        ],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x + 5.0, center.y - 5.0),
+            egui::pos2(center.x - 5.0, center.y + 5.0),
+        ],
+        stroke,
+    );
+    response.clicked()
+}
+
+fn project_status_combo(ui: &mut egui::Ui, index: usize, status: &mut ProjectStatus) -> bool {
+    let before = *status;
+    bright_combo(ui, |ui| {
+        let popup = ComboBox::from_id_salt(("project-status", index))
+            .selected_text(match status {
+                ProjectStatus::Active => "Active",
+                ProjectStatus::Finished => "Finished",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(status, ProjectStatus::Active, "Active");
+                ui.selectable_value(status, ProjectStatus::Finished, "Finished");
+            });
+        popup
+            .response
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+    });
+    *status != before
+}
+
+fn stat_label(ui: &mut egui::Ui, label: &str, value: String) {
+    ui.label(
+        RichText::new(format!("{label}: {value}"))
+            .small()
+            .color(Color32::from_gray(100)),
+    );
+}
+
+fn format_stat_date(timestamp: Option<i64>) -> String {
+    timestamp
+        .map(|value| local_datetime(value).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+fn usage_intervals(store: &Store) -> Vec<(ActivityId, Option<ProjectId>, i64, i64)> {
+    let mut intervals: Vec<_> = store
+        .time_entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.activity,
+                entry.project,
+                entry.time.started_at.0,
+                entry.time.stopped_at.0,
+            )
+        })
+        .collect();
+    if let Some(active) = &store.active_entry {
+        intervals.push((active.activity, active.project, active.started_at.0, now()));
+    }
+    intervals
+}
+
+fn project_stats(store: &Store, project: ProjectId) -> UsageStats {
+    let mut stats = UsageStats::default();
+    let mut days = BTreeSet::new();
+    let mut activity_totals: BTreeMap<usize, u64> = BTreeMap::new();
+    for (activity, entry_project, start, stop) in usage_intervals(store) {
+        if entry_project != Some(project) || stop <= start {
+            continue;
+        }
+        let seconds = (stop - start) as u64;
+        stats.entries += 1;
+        stats.total_seconds += seconds;
+        stats.first_used = Some(stats.first_used.map_or(start, |value| value.min(start)));
+        stats.last_used = Some(stats.last_used.map_or(start, |value| value.max(start)));
+        *activity_totals.entry(activity.0).or_default() += seconds;
+        let mut split = BTreeMap::new();
+        add_interval_to_days(&mut split, start, stop);
+        days.extend(split.into_keys());
+    }
+    stats.active_days = days.len();
+    stats.related_count = activity_totals.len();
+    stats
+}
+
+fn activity_stats(store: &Store, activity: ActivityId) -> UsageStats {
+    let mut stats = UsageStats::default();
+    let mut days = BTreeSet::new();
+    let mut project_totals: BTreeMap<Option<usize>, u64> = BTreeMap::new();
+    for (entry_activity, project, start, stop) in usage_intervals(store) {
+        if entry_activity != activity || stop <= start {
+            continue;
+        }
+        let seconds = (stop - start) as u64;
+        stats.entries += 1;
+        stats.total_seconds += seconds;
+        stats.first_used = Some(stats.first_used.map_or(start, |value| value.min(start)));
+        stats.last_used = Some(stats.last_used.map_or(start, |value| value.max(start)));
+        *project_totals
+            .entry(project.map(|project| project.0))
+            .or_default() += seconds;
+        let mut split = BTreeMap::new();
+        add_interval_to_days(&mut split, start, stop);
+        days.extend(split.into_keys());
+    }
+    stats.active_days = days.len();
+    stats.related_count = project_totals
+        .keys()
+        .filter(|project| project.is_some())
+        .count();
+    stats
+}
+
+fn totals_by_local_day(store: &Store, current_time: i64) -> BTreeMap<NaiveDate, u64> {
+    let mut totals = BTreeMap::new();
+    for entry in &store.time_entries {
+        add_interval_to_days(
+            &mut totals,
+            entry.time.started_at.0,
+            entry.time.stopped_at.0,
+        );
+    }
+    if let Some(active) = &store.active_entry {
+        add_interval_to_days(&mut totals, active.started_at.0, current_time);
+    }
+    totals
+}
+
+fn project_totals_by_local_day(
+    store: &Store,
+    current_time: i64,
+) -> BTreeMap<NaiveDate, BTreeMap<Option<usize>, u64>> {
+    let mut totals = BTreeMap::new();
+    for entry in &store.time_entries {
+        add_project_interval_to_days(
+            &mut totals,
+            entry.project.map(|project| project.0),
+            entry.time.started_at.0,
+            entry.time.stopped_at.0,
+        );
+    }
+    if let Some(active) = &store.active_entry {
+        add_project_interval_to_days(
+            &mut totals,
+            active.project.map(|project| project.0),
+            active.started_at.0,
+            current_time,
+        );
+    }
+    totals
+}
+
+fn add_project_interval_to_days(
+    totals: &mut BTreeMap<NaiveDate, BTreeMap<Option<usize>, u64>>,
+    project: Option<usize>,
+    start: i64,
+    stop: i64,
+) {
+    let mut split = BTreeMap::new();
+    add_interval_to_days(&mut split, start, stop);
+    for (date, seconds) in split {
+        *totals.entry(date).or_default().entry(project).or_default() += seconds;
+    }
+}
+
+fn add_interval_to_days(totals: &mut BTreeMap<NaiveDate, u64>, start: i64, stop: i64) {
+    if stop <= start {
+        return;
+    }
+    let mut cursor = start;
+    while cursor < stop {
+        let date = local_datetime(cursor).date_naive();
+        let Some(next_date) = date.succ_opt() else {
+            break;
+        };
+        let next_midnight = local_naive_timestamp(next_date.and_hms_opt(0, 0, 0).unwrap())
+            .unwrap_or(stop)
+            .max(cursor + 1);
+        let segment_end = stop.min(next_midnight);
+        *totals.entry(date).or_default() += (segment_end - cursor) as u64;
+        cursor = segment_end;
+    }
+}
+
+fn totals_by_week(day_totals: &BTreeMap<NaiveDate, u64>) -> BTreeMap<NaiveDate, u64> {
+    let mut totals = BTreeMap::new();
+    for (&date, &seconds) in day_totals {
+        *totals.entry(week_start(date)).or_default() += seconds;
+    }
+    totals
+}
+
+fn week_start(date: NaiveDate) -> NaiveDate {
+    date - ChronoDuration::days(date.weekday().num_days_from_monday() as i64)
+}
+
+fn week_title(week: NaiveDate, this_week: NaiveDate) -> String {
+    if week == this_week {
+        "This week".to_owned()
+    } else if week == this_week - ChronoDuration::weeks(1) {
+        "Last week".to_owned()
+    } else {
+        format!("Week of {}", week.format("%B %-d, %Y"))
+    }
+}
+
+fn day_title(date: NaiveDate, today: NaiveDate) -> String {
+    if date == today {
+        "Today".to_owned()
+    } else if date == today - ChronoDuration::days(1) {
+        "Yesterday".to_owned()
+    } else {
+        date.format("%A, %B %-d, %Y").to_string()
+    }
+}
+
+fn start_label(time: TimeRange) -> String {
+    local_datetime(time.started_at.0)
+        .format("%H:%M")
+        .to_string()
+}
+
+fn stop_label(time: TimeRange) -> String {
+    local_datetime(time.stopped_at.0)
+        .format("%H:%M")
+        .to_string()
+}
+
+fn inline_time_field(
+    ui: &mut egui::Ui,
+    buffers: &mut BTreeMap<(usize, TimeEndpoint), String>,
+    entry_index: usize,
+    endpoint: TimeEndpoint,
+    label: String,
+) -> Option<TimeEditRequest> {
+    let text = buffers
+        .entry((entry_index, endpoint))
+        .or_insert_with(|| label.clone());
+    let response = ui.add(
+        egui::TextEdit::singleline(text)
+            .id_salt(("inline-time", entry_index, endpoint))
+            .desired_width(52.0)
+            .horizontal_align(Align::Center),
+    );
+    if response.lost_focus() && *text != label {
+        Some(TimeEditRequest {
+            entry_index,
+            endpoint,
+            text: text.clone(),
+        })
+    } else {
+        None
+    }
+}
+
+fn edited_time_range(
+    original: TimeRange,
+    endpoint: TimeEndpoint,
+    edited_text: &str,
+) -> Result<TimeRange, String> {
+    let original_start = local_datetime(original.started_at.0);
+    let original_stop = local_datetime(original.stopped_at.0);
+    let original_endpoint = match endpoint {
+        TimeEndpoint::Start => original_start.time(),
+        TimeEndpoint::Stop => original_stop.time(),
+    };
+    let edited = NaiveTime::parse_from_str(edited_text.trim(), "%H:%M")
+        .map_err(|_| "Time must use HH:MM".to_owned())?
+        .with_second(original_endpoint.second())
+        .and_then(|time| time.with_nanosecond(original_endpoint.nanosecond()))
+        .ok_or_else(|| "Time is out of range".to_owned())?;
+    let date = original_start.date_naive();
+    let start_time = if endpoint == TimeEndpoint::Start {
+        edited
+    } else {
+        original_start.time()
+    };
+    let stop_time = if endpoint == TimeEndpoint::Stop {
+        edited
+    } else {
+        original_stop.time()
+    };
+    if start_time == stop_time {
+        return Err("Start and stop time cannot be equal".to_owned());
+    }
+    let stop_date = if stop_time < start_time {
+        date.succ_opt()
+            .ok_or_else(|| "Date is out of range".to_owned())?
+    } else {
+        date
+    };
+    let started_at = local_naive_timestamp(NaiveDateTime::new(date, start_time))?;
+    let stopped_at = local_naive_timestamp(NaiveDateTime::new(stop_date, stop_time))?;
+    let duration = stopped_at - started_at;
+    if duration <= 0 || duration > 24 * 60 * 60 {
+        return Err("A time entry must be between 1 minute and 24 hours".to_owned());
+    }
+    Ok(TimeRange {
+        started_at: UnixSeconds(started_at),
+        stopped_at: UnixSeconds(stopped_at),
+    })
+}
+
+fn local_naive_timestamp(value: NaiveDateTime) -> Result<i64, String> {
+    match Local.from_local_datetime(&value) {
+        LocalResult::Single(value) => Ok(value.timestamp()),
+        LocalResult::Ambiguous(first, _) => Ok(first.timestamp()),
+        LocalResult::None => Err("That local time does not exist in this time zone".to_owned()),
+    }
 }
 
 fn read_store(path: &Path) -> Result<Store, String> {
@@ -424,9 +1776,10 @@ fn default_store_path() -> PathBuf {
 }
 
 fn write_store(path: &Path, store: &Store) -> Result<(), String> {
+    settings::back_up_if_due(path)?;
     let mut json = serde_json::to_string_pretty(store).map_err(|error| error.to_string())?;
     json.push('\n');
-    fs::write(path, json).map_err(|error| error.to_string())
+    settings::atomic_write(path, json.as_bytes())
 }
 
 fn now() -> i64 {
@@ -446,6 +1799,24 @@ fn format_duration(seconds: u64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
+fn format_stat_duration(seconds: u64) -> String {
+    if seconds >= 3600 {
+        let hours = seconds / 3600;
+        format!("{hours} {}", if hours == 1 { "hour" } else { "hours" })
+    } else if seconds >= 60 {
+        let minutes = seconds / 60;
+        format!(
+            "{minutes} {}",
+            if minutes == 1 { "minute" } else { "minutes" }
+        )
+    } else {
+        format!(
+            "{seconds} {}",
+            if seconds == 1 { "second" } else { "seconds" }
+        )
+    }
+}
+
 fn color(color: RgbColor) -> Color32 {
     Color32::from_rgb(color.red, color.green, color.blue)
 }
@@ -460,7 +1831,6 @@ mod tests {
             .join("data")
             .join("time_tracker_store.json");
         let store = read_store(&path).expect("converted store must load");
-
         assert!(!store.time_entries.is_empty());
         for entry in &store.time_entries {
             assert!(entry.activity.0 < store.activities.len());
@@ -475,5 +1845,96 @@ mod tests {
                 .project
                 .is_none_or(|project| project.0 < store.projects.len()));
         }
+    }
+
+    #[test]
+    fn overnight_entry_is_split_between_local_days() {
+        let start = local_naive_timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 15)
+                .unwrap()
+                .and_hms_opt(23, 30, 0)
+                .unwrap(),
+        )
+        .unwrap();
+        let stop = local_naive_timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 16)
+                .unwrap()
+                .and_hms_opt(2, 20, 0)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut totals = BTreeMap::new();
+        add_interval_to_days(&mut totals, start, stop);
+        assert_eq!(
+            totals[&NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()],
+            30 * 60
+        );
+        assert_eq!(
+            totals[&NaiveDate::from_ymd_opt(2026, 9, 16).unwrap()],
+            2 * 60 * 60 + 20 * 60
+        );
+    }
+
+    #[test]
+    fn inline_stop_time_before_start_is_the_following_day() {
+        let start = local_naive_timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 15)
+                .unwrap()
+                .and_hms_opt(23, 0, 0)
+                .unwrap(),
+        )
+        .unwrap();
+        let stop = local_naive_timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 16)
+                .unwrap()
+                .and_hms_opt(0, 2, 0)
+                .unwrap(),
+        )
+        .unwrap();
+        let edited = edited_time_range(
+            TimeRange {
+                started_at: UnixSeconds(start),
+                stopped_at: UnixSeconds(stop),
+            },
+            TimeEndpoint::Stop,
+            "02:20",
+        )
+        .unwrap();
+
+        assert_eq!(start_label(edited), "23:00");
+        assert_eq!(stop_label(edited), "02:20");
+        assert_eq!(edited.duration_seconds(), Some(3 * 60 * 60 + 20 * 60));
+    }
+
+    #[test]
+    fn unchanged_displayed_time_preserves_hidden_seconds() {
+        let start = local_naive_timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 16)
+                .unwrap()
+                .and_hms_opt(15, 2, 17)
+                .unwrap(),
+        )
+        .unwrap();
+        let stop = local_naive_timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 16)
+                .unwrap()
+                .and_hms_opt(15, 58, 43)
+                .unwrap(),
+        )
+        .unwrap();
+        let original = TimeRange {
+            started_at: UnixSeconds(start),
+            stopped_at: UnixSeconds(stop),
+        };
+
+        let edited = edited_time_range(original, TimeEndpoint::Start, "15:02").unwrap();
+        assert_eq!(edited, original);
+    }
+
+    #[test]
+    fn statistics_use_one_largest_unit() {
+        assert_eq!(format_stat_duration(300 * 3600 + 42 * 60), "300 hours");
+        assert_eq!(format_stat_duration(30 * 60 + 42), "30 minutes");
+        assert_eq!(format_stat_duration(42), "42 seconds");
     }
 }

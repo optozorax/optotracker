@@ -1,11 +1,26 @@
 [package]
-name = "personal-time-tracker"
+name = "opto-tracker"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 chrono = "0.4"
-eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "persistence"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[build-dependencies]
+winresource = "0.1.31"
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+tray-icon = "0.25.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
