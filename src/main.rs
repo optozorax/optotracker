@@ -10,9 +10,9 @@ use eframe::egui::{
     self, Align, Align2, AtomExt, Button, Color32, ComboBox, FontData, FontDefinitions, FontFamily,
     FontId, Frame, Layout, RichText, ScrollArea, Stroke,
 };
-use egui_extras::DatePickerButton;
 
 mod app_icon;
+mod date_picker;
 mod desktop;
 mod github_activity;
 mod local_time;
@@ -24,6 +24,7 @@ mod single_instance;
 mod storage;
 mod tray;
 
+use date_picker::DatePickerButton;
 use github_activity::{
     heat_color, CalendarHeatmap, CellFill, Segment, SelectionChange as CalendarSelectionChange,
 };
@@ -1722,26 +1723,12 @@ fn stop_label(time: TimeRange) -> String {
 
 fn entry_date_picker(ui: &mut egui::Ui, entry_id: EntryId, time: TimeRange) -> Option<NaiveDate> {
     let original = local_datetime(time.started_at.0).date_naive();
-    let mut selected = original
-        .to_string()
-        .parse()
-        .expect("local entry dates must fit the date picker");
-    let id_salt = format!("entry-date-{}", entry_id.0);
+    let mut selected = original;
     let response = ui
-        .add(
-            DatePickerButton::new(&mut selected)
-                .id_salt(&id_salt)
-                .format("")
-                .calendar_week(false),
-        )
+        .add(DatePickerButton::new(&mut selected, ("entry-date", entry_id)).year_range(2000..=3000))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!("Change date ({})", original.format("%B %-d, %Y")));
-    response.changed().then(|| {
-        selected
-            .to_string()
-            .parse()
-            .expect("date picker returned an invalid date")
-    })
+    response.changed().then_some(selected)
 }
 
 fn inline_time_field(
