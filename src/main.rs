@@ -49,6 +49,7 @@ const HEADER: Color32 = Color32::from_rgb(228, 236, 241);
 const BORDER: Color32 = Color32::from_rgb(218, 227, 232);
 const SELECTOR_HEIGHT: f32 = 30.0;
 const ENTRIES_PER_PAGE: usize = 100;
+const UI_SELECTIONS_MEMORY_ID: &str = "opto_tracker_ui_selections_v1";
 
 fn main() -> eframe::Result {
     let _instance_guard = match single_instance::SingleInstanceGuard::acquire() {
@@ -194,11 +195,43 @@ enum AppView {
     Settings,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 enum CalendarMode {
     #[default]
     Time,
     Projects,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct RememberedSelections {
+    activity: ActivityId,
+    project: Option<ProjectId>,
+    calendar_mode: CalendarMode,
+}
+
+impl RememberedSelections {
+    fn defaults_for(store: &Store) -> Self {
+        Self {
+            activity: ActivityId(store.activities.len().saturating_sub(1)),
+            project: None,
+            calendar_mode: CalendarMode::default(),
+        }
+    }
+
+    fn validated_for(self, store: &Store) -> Self {
+        let defaults = Self::defaults_for(store);
+        Self {
+            activity: if self.activity.0 < store.activities.len() {
+                self.activity
+            } else {
+                defaults.activity
+            },
+            project: self
+                .project
+                .filter(|project| project.0 < store.projects.len()),
+            calendar_mode: self.calendar_mode,
+        }
+    }
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -285,7 +318,12 @@ impl TimeTrackerApp {
         start_minimized: bool,
         ctx: &egui::Context,
     ) -> Self {
-        let draft_activity = ActivityId(store.activities.len().saturating_sub(1));
+        let remembered = ctx
+            .data_mut(|data| {
+                data.get_persisted::<RememberedSelections>(egui::Id::new(UI_SELECTIONS_MEMORY_ID))
+            })
+            .map(|selections| selections.validated_for(&store))
+            .unwrap_or_else(|| RememberedSelections::defaults_for(&store));
         let running = store.active_entry.is_some();
         let tray = tray::TrayController::new(running);
         let preferences: PersistedSettings = storage
@@ -310,15 +348,15 @@ impl TimeTrackerApp {
             last_saved_store: store.clone(),
             store,
             view: AppView::Entries,
-            draft_activity,
-            draft_project: None,
+            draft_activity: remembered.activity,
+            draft_project: remembered.project,
             message,
             new_project_name: String::new(),
             new_project_color: [104, 159, 56],
             new_activity_name: String::new(),
             time_edit_buffers: BTreeMap::new(),
             calendar: CalendarHeatmap::default(),
-            calendar_mode: CalendarMode::default(),
+            calendar_mode: remembered.calendar_mode,
             selected_date: None,
             entry_pagination: Pagination::new(ENTRIES_PER_PAGE),
             last_icon_running: None,
@@ -346,6 +384,20 @@ impl TimeTrackerApp {
                 self.message = format!("Save failed; change was reverted: {error}");
             }
         }
+    }
+
+    fn remember_selections(&self, ctx: &egui::Context) {
+        let id = egui::Id::new(UI_SELECTIONS_MEMORY_ID);
+        let selections = RememberedSelections {
+            activity: self.draft_activity,
+            project: self.draft_project,
+            calendar_mode: self.calendar_mode,
+        };
+        ctx.data_mut(|data| {
+            if data.get_persisted::<RememberedSelections>(id) != Some(selections) {
+                data.insert_persisted(id, selections);
+            }
+        });
     }
 
     fn start_timer(&mut self) {
@@ -1368,6 +1420,7 @@ impl eframe::App for TimeTrackerApp {
                     AppView::Settings => self.settings_panel(ui),
                 }
             });
+        self.remember_selections(ui.ctx());
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1883,5 +1936,39 @@ mod tests {
             entry_offset_for_date(&entries, NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()),
             3
         );
+    }
+
+    #[test]
+    fn remembered_selections_discard_missing_model_references() {
+        let store = Store {
+            projects: vec![Project {
+                name: "Project".to_owned(),
+                color: RgbColor {
+                    red: 1,
+                    green: 2,
+                    blue: 3,
+                },
+                status: ProjectStatus::Active,
+            }],
+            activities: vec![
+                Activity {
+                    name: "First".to_owned(),
+                },
+                Activity {
+                    name: "Latest".to_owned(),
+                },
+            ],
+            ..Store::default()
+        };
+        let restored = RememberedSelections {
+            activity: ActivityId(99),
+            project: Some(ProjectId(99)),
+            calendar_mode: CalendarMode::Projects,
+        }
+        .validated_for(&store);
+
+        assert_eq!(restored.activity, ActivityId(1));
+        assert_eq!(restored.project, None);
+        assert_eq!(restored.calendar_mode, CalendarMode::Projects);
     }
 }

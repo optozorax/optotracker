@@ -32,6 +32,10 @@ rules to maintain.
 - `main.rs` is the composition layer and egui UI. It turns UI interactions into
   model changes and persists them.
 
+Presentation-only selections, such as the idle timer's activity/project and the
+calendar display mode, live in egui's persisted memory. They remain separate
+from the tracker data in `data.json` and are validated against it when restored.
+
 ## Data rules
 
 Completed entries have stable `EntryId` values. Vector positions are only an
