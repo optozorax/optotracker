@@ -21,7 +21,7 @@ mod single_instance;
 mod storage;
 mod tray;
 
-use github_activity::{ActivitySegment, GithubActivity};
+use github_activity::{heat_color, CalendarHeatmap, CellFill, Segment};
 use local_time::{datetime as local_datetime, timestamp as local_naive_timestamp};
 
 use model::{
@@ -191,6 +191,13 @@ enum AppView {
     Settings,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CalendarMode {
+    #[default]
+    Time,
+    Projects,
+}
+
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 struct PersistedSettings {
@@ -233,6 +240,13 @@ struct ProjectOption {
     status: ProjectStatus,
 }
 
+struct ProjectContribution {
+    label: String,
+    detail: String,
+    color: Color32,
+    weight: f32,
+}
+
 struct TimeTrackerApp {
     repository: JsonStore,
     store: Store,
@@ -245,7 +259,8 @@ struct TimeTrackerApp {
     new_project_color: [u8; 3],
     new_activity_name: String,
     time_edit_buffers: BTreeMap<(EntryId, TimeEndpoint), String>,
-    github_activity: GithubActivity,
+    calendar: CalendarHeatmap,
+    calendar_mode: CalendarMode,
     entry_page: usize,
     last_icon_running: Option<bool>,
     tray: Option<tray::TrayController>,
@@ -295,7 +310,8 @@ impl TimeTrackerApp {
             new_project_color: [104, 159, 56],
             new_activity_name: String::new(),
             time_edit_buffers: BTreeMap::new(),
-            github_activity: GithubActivity::default(),
+            calendar: CalendarHeatmap::default(),
+            calendar_mode: CalendarMode::default(),
             entry_page: 0,
             last_icon_running: None,
             tray,
@@ -466,7 +482,7 @@ impl TimeTrackerApp {
         let activities = activity_options(&self.store, current_time);
         let projects = project_options(&self.store);
         let day_totals = totals_by_local_day(&self.store, current_time);
-        let project_segments: BTreeMap<NaiveDate, Vec<ActivitySegment>> =
+        let project_contributions: BTreeMap<NaiveDate, Vec<ProjectContribution>> =
             project_totals_by_local_day(&self.store, current_time)
                 .into_iter()
                 .map(|(date, contributions)| {
@@ -480,7 +496,7 @@ impl TimeTrackerApp {
                                 .unwrap_or_else(|| {
                                     ("No project".to_owned(), Color32::from_gray(125))
                                 });
-                            ActivitySegment {
+                            ProjectContribution {
                                 label,
                                 detail: format_duration(seconds),
                                 color: segment_color,
@@ -491,6 +507,21 @@ impl TimeTrackerApp {
                     (date, segments)
                 })
                 .collect();
+        let project_segments: BTreeMap<NaiveDate, Vec<Segment>> = project_contributions
+            .iter()
+            .map(|(&date, contributions)| {
+                (
+                    date,
+                    contributions
+                        .iter()
+                        .map(|contribution| Segment {
+                            color: contribution.color,
+                            weight: contribution.weight,
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
         let week_totals = totals_by_week(&day_totals);
         let today = Local::now().date_naive();
         let this_week = week_start(today);
@@ -534,16 +565,74 @@ impl TimeTrackerApp {
                         ui.horizontal(|ui| {
                             ui.heading("Activity");
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                self.github_activity.color_controls(ui);
+                                ui.selectable_value(
+                                    &mut self.calendar_mode,
+                                    CalendarMode::Projects,
+                                    "Projects",
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                ui.selectable_value(
+                                    &mut self.calendar_mode,
+                                    CalendarMode::Time,
+                                    "Time",
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
                             });
                         });
-                        self.github_activity.ui(
+                        let calendar_mode = self.calendar_mode;
+                        self.calendar.ui(
                             ui,
-                            &day_totals,
-                            &project_segments,
                             today,
-                            |seconds| seconds as f32 / (8.0 * 60.0 * 60.0),
-                            format_duration,
+                            |date| match calendar_mode {
+                                CalendarMode::Time => day_totals
+                                    .get(&date)
+                                    .map(|seconds| {
+                                        CellFill::Solid(heat_color(
+                                            *seconds as f32 / (8.0 * 60.0 * 60.0),
+                                        ))
+                                    })
+                                    .unwrap_or(CellFill::Empty),
+                                CalendarMode::Projects => project_segments
+                                    .get(&date)
+                                    .map(|segments| CellFill::Segmented(segments))
+                                    .unwrap_or(CellFill::Empty),
+                            },
+                            |ui, date| {
+                                ui.set_min_width(220.0);
+                                ui.label(date.format("%A, %B %-d, %Y").to_string());
+                                ui.label(
+                                    day_totals
+                                        .get(&date)
+                                        .copied()
+                                        .map(format_duration)
+                                        .unwrap_or_else(|| "No time tracked".to_owned()),
+                                );
+                                if calendar_mode == CalendarMode::Projects {
+                                    if let Some(contributions) = project_contributions.get(&date) {
+                                        ui.separator();
+                                        for contribution in contributions {
+                                            ui.horizontal(|ui| {
+                                                let (swatch, _) = ui.allocate_exact_size(
+                                                    egui::vec2(10.0, 10.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    swatch,
+                                                    2.0,
+                                                    contribution.color,
+                                                );
+                                                ui.label(&contribution.label);
+                                                ui.with_layout(
+                                                    Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        ui.label(&contribution.detail);
+                                                    },
+                                                );
+                                            });
+                                        }
+                                    }
+                                }
+                            },
                         );
                     });
                 ui.add_space(12.0);

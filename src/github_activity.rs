@@ -1,9 +1,6 @@
-use std::collections::BTreeMap;
-
 use chrono::{Datelike, Duration, NaiveDate};
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, Sense, Stroke, StrokeKind,
-    Vec2,
+    self, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, Vec2,
 };
 
 const WEEKS: usize = 53;
@@ -11,50 +8,35 @@ const DAYS: usize = 7;
 const LABEL_WIDTH: f32 = 34.0;
 const LABEL_HEIGHT: f32 = 18.0;
 
-#[derive(Clone)]
-pub struct ActivitySegment {
-    pub label: String,
-    pub detail: String,
+#[derive(Clone, Copy)]
+pub struct Segment {
     pub color: Color32,
     pub weight: f32,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum ColorMode {
-    #[default]
-    Time,
-    Projects,
+pub enum CellFill<'a> {
+    Empty,
+    Solid(Color32),
+    Segmented(&'a [Segment]),
 }
 
 /// Reusable GitHub-style calendar heatmap state.
 ///
-/// The values are intentionally generic. Callers supply dated values and the
-/// formatter used by the hover tooltip.
+/// The caller supplies cell presentation and tooltip content, so the widget
+/// does not know what the dates or colors mean.
 #[derive(Default)]
-pub struct GithubActivity {
+pub struct CalendarHeatmap {
     week_offset: i32,
     drag_remainder: f32,
-    color_mode: ColorMode,
 }
 
-impl GithubActivity {
-    pub fn color_controls(&mut self, ui: &mut egui::Ui) {
-        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            ui.selectable_value(&mut self.color_mode, ColorMode::Time, "Time")
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            ui.selectable_value(&mut self.color_mode, ColorMode::Projects, "Projects")
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-        });
-    }
-
-    pub fn ui<T: Copy>(
+impl CalendarHeatmap {
+    pub fn ui<'a>(
         &mut self,
         ui: &mut egui::Ui,
-        values: &BTreeMap<NaiveDate, T>,
-        project_segments: &BTreeMap<NaiveDate, Vec<ActivitySegment>>,
         today: NaiveDate,
-        intensity: impl Fn(T) -> f32,
-        format_value: impl Fn(T) -> String,
+        fill: impl Fn(NaiveDate) -> CellFill<'a>,
+        tooltip: impl Fn(&mut egui::Ui, NaiveDate),
     ) {
         let available = ui.available_width().max(420.0);
         let step = ((available - LABEL_WIDTH) / WEEKS as f32).max(7.0);
@@ -91,19 +73,17 @@ impl GithubActivity {
                 let cell = Rect::from_min_size(min, Vec2::splat(square));
                 if date > today {
                     ui.painter().rect_filled(cell, 2.0, Color32::from_gray(246));
-                } else if self.color_mode == ColorMode::Projects {
-                    if let Some(segments) = project_segments.get(&date) {
-                        paint_project_segments(ui, cell, segments);
-                    } else {
-                        ui.painter()
-                            .rect_filled(cell, 2.0, Color32::from_rgb(235, 237, 240));
-                    }
-                } else if let Some(value) = values.get(&date).copied() {
-                    ui.painter()
-                        .rect_filled(cell, 2.0, activity_color(intensity(value)));
                 } else {
-                    ui.painter()
-                        .rect_filled(cell, 2.0, Color32::from_rgb(235, 237, 240));
+                    match fill(date) {
+                        CellFill::Empty => {
+                            ui.painter()
+                                .rect_filled(cell, 2.0, Color32::from_rgb(235, 237, 240));
+                        }
+                        CellFill::Solid(color) => {
+                            ui.painter().rect_filled(cell, 2.0, color);
+                        }
+                        CellFill::Segmented(segments) => paint_segments(ui, cell, segments),
+                    }
                 }
                 Self::paint_calendar_boundaries(
                     ui,
@@ -126,37 +106,7 @@ impl GithubActivity {
                         Stroke::new(1.5, separator),
                         StrokeKind::Outside,
                     );
-                    let value = values.get(&date).copied();
-                    cell_response.on_hover_ui_at_pointer(|ui| {
-                        ui.set_min_width(220.0);
-                        ui.label(date.format("%A, %B %-d, %Y").to_string());
-                        ui.label(
-                            value
-                                .map(&format_value)
-                                .unwrap_or_else(|| "No time tracked".to_owned()),
-                        );
-                        if self.color_mode == ColorMode::Projects {
-                            if let Some(segments) = project_segments.get(&date) {
-                                ui.separator();
-                                for segment in segments {
-                                    ui.horizontal(|ui| {
-                                        let (swatch, _) = ui.allocate_exact_size(
-                                            egui::vec2(10.0, 10.0),
-                                            Sense::hover(),
-                                        );
-                                        ui.painter().rect_filled(swatch, 2.0, segment.color);
-                                        ui.label(&segment.label);
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                ui.label(&segment.detail);
-                                            },
-                                        );
-                                    });
-                                }
-                            }
-                        }
-                    });
+                    cell_response.on_hover_ui_at_pointer(|ui| tooltip(ui, date));
                 }
             }
         }
@@ -304,7 +254,7 @@ impl GithubActivity {
     }
 }
 
-fn paint_project_segments(ui: &egui::Ui, cell: Rect, segments: &[ActivitySegment]) {
+fn paint_segments(ui: &egui::Ui, cell: Rect, segments: &[Segment]) {
     let total: f32 = segments.iter().map(|segment| segment.weight.max(0.0)).sum();
     if total <= 0.0 {
         ui.painter()
@@ -336,7 +286,7 @@ fn paint_project_segments(ui: &egui::Ui, cell: Rect, segments: &[ActivitySegment
     }
 }
 
-fn activity_color(value: f32) -> Color32 {
+pub fn heat_color(value: f32) -> Color32 {
     if value > 1.0 {
         return Color32::from_rgb(31, 35, 40);
     }
