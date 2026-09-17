@@ -10,6 +10,7 @@ use eframe::egui::{
     self, Align, Align2, AtomExt, Button, Color32, ComboBox, FontData, FontDefinitions, FontFamily,
     FontId, Frame, Layout, RichText, ScrollArea, Stroke,
 };
+use egui_extras::DatePickerButton;
 
 mod app_icon;
 mod desktop;
@@ -220,6 +221,12 @@ struct TimeEditRequest {
     entry_id: EntryId,
     endpoint: TimeEndpoint,
     text: String,
+}
+
+#[derive(Clone, Copy)]
+struct DateEditRequest {
+    entry_id: EntryId,
+    date: NaiveDate,
 }
 
 struct ActivityOption {
@@ -526,6 +533,7 @@ impl TimeTrackerApp {
         let mut delete = None;
         let mut start_request = None;
         let mut time_commits = Vec::new();
+        let mut date_commits = Vec::new();
         let mut current_week: Option<NaiveDate> = None;
         let can_start = self.store.active_entry.is_none();
 
@@ -745,6 +753,11 @@ impl TimeTrackerApp {
                                             .size(18.0)
                                             .strong(),
                                         );
+                                        if let Some(date) =
+                                            entry_date_picker(ui, entry_id, entry.time)
+                                        {
+                                            date_commits.push(DateEditRequest { entry_id, date });
+                                        }
                                         if let Some(edit) = inline_time_field(
                                             ui,
                                             &mut self.time_edit_buffers,
@@ -786,6 +799,11 @@ impl TimeTrackerApp {
                 self.apply_inline_time_edit(edit);
             }
         }
+        for edit in date_commits {
+            if delete != Some(edit.entry_id) {
+                self.apply_date_edit(edit);
+            }
+        }
         if let Some((activity, project)) = start_request {
             self.start_with(activity, project);
         }
@@ -814,6 +832,28 @@ impl TimeTrackerApp {
                 self.time_edit_buffers
                     .remove(&(edit.entry_id, edit.endpoint));
             }
+        }
+    }
+
+    fn apply_date_edit(&mut self, edit: DateEditRequest) {
+        let result = self
+            .store
+            .entry(edit.entry_id)
+            .cloned()
+            .ok_or_else(|| "The entry no longer exists".to_owned())
+            .and_then(|entry| local_time::edit_date(entry.time, edit.date));
+        match result {
+            Ok(time) => {
+                if let Some(entry) = self.store.entry_mut(edit.entry_id) {
+                    entry.time = time;
+                    self.store
+                        .time_entries
+                        .sort_by_key(|entry| entry.time.started_at);
+                    self.time_edit_buffers.clear();
+                    self.save();
+                }
+            }
+            Err(error) => self.message = error,
         }
     }
 
@@ -1678,6 +1718,30 @@ fn stop_label(time: TimeRange) -> String {
     local_datetime(time.stopped_at.0)
         .format("%H:%M")
         .to_string()
+}
+
+fn entry_date_picker(ui: &mut egui::Ui, entry_id: EntryId, time: TimeRange) -> Option<NaiveDate> {
+    let original = local_datetime(time.started_at.0).date_naive();
+    let mut selected = original
+        .to_string()
+        .parse()
+        .expect("local entry dates must fit the date picker");
+    let id_salt = format!("entry-date-{}", entry_id.0);
+    let response = ui
+        .add(
+            DatePickerButton::new(&mut selected)
+                .id_salt(&id_salt)
+                .format("")
+                .calendar_week(false),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("Change date ({})", original.format("%B %-d, %Y")));
+    response.changed().then(|| {
+        selected
+            .to_string()
+            .parse()
+            .expect("date picker returned an invalid date")
+    })
 }
 
 fn inline_time_field(

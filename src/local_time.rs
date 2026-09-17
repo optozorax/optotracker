@@ -100,6 +100,30 @@ pub fn edit_time(
     })
 }
 
+/// Moves an entry to a new local start date while preserving its displayed
+/// start and stop times and whether its stop falls on a later local date.
+pub fn edit_date(original: TimeRange, date: NaiveDate) -> Result<TimeRange, String> {
+    let original_start = datetime(original.started_at.0);
+    let original_stop = datetime(original.stopped_at.0);
+    let day_offset = original_stop
+        .date_naive()
+        .signed_duration_since(original_start.date_naive())
+        .num_days();
+    let stop_date = date
+        .checked_add_signed(chrono::Duration::days(day_offset))
+        .ok_or_else(|| "Date is out of range".to_owned())?;
+    let started_at = timestamp(NaiveDateTime::new(date, original_start.time()))?;
+    let stopped_at = timestamp(NaiveDateTime::new(stop_date, original_stop.time()))?;
+    let duration = stopped_at - started_at;
+    if duration <= 0 || duration > MAX_ENTRY_SECONDS {
+        return Err("A time entry must be between 1 second and 24 hours".to_owned());
+    }
+    Ok(TimeRange {
+        started_at: UnixSeconds(started_at),
+        stopped_at: UnixSeconds(stopped_at),
+    })
+}
+
 fn parse_time(text: &str) -> Result<NaiveTime, String> {
     let text = text.trim();
     let format = match text.as_bytes() {
@@ -235,5 +259,75 @@ mod tests {
     fn malformed_time_reports_both_accepted_formats() {
         let error = parse_time("945").unwrap_err();
         assert_eq!(error, "Time must use HH:MM or HHMM");
+    }
+
+    #[test]
+    fn editing_date_preserves_clock_times_and_hidden_seconds() {
+        let original = TimeRange {
+            started_at: UnixSeconds(
+                timestamp(
+                    NaiveDate::from_ymd_opt(2026, 9, 16)
+                        .unwrap()
+                        .and_hms_opt(9, 15, 17)
+                        .unwrap(),
+                )
+                .unwrap(),
+            ),
+            stopped_at: UnixSeconds(
+                timestamp(
+                    NaiveDate::from_ymd_opt(2026, 9, 16)
+                        .unwrap()
+                        .and_hms_opt(10, 30, 43)
+                        .unwrap(),
+                )
+                .unwrap(),
+            ),
+        };
+
+        let date = NaiveDate::from_ymd_opt(2026, 8, 2).unwrap();
+        let edited = edit_date(original, date).unwrap();
+
+        assert_eq!(datetime(edited.started_at.0).date_naive(), date);
+        assert_eq!(
+            datetime(edited.started_at.0).time(),
+            datetime(original.started_at.0).time()
+        );
+        assert_eq!(
+            datetime(edited.stopped_at.0).time(),
+            datetime(original.stopped_at.0).time()
+        );
+    }
+
+    #[test]
+    fn editing_date_preserves_an_overnight_stop_date() {
+        let original = TimeRange {
+            started_at: UnixSeconds(
+                timestamp(
+                    NaiveDate::from_ymd_opt(2026, 9, 16)
+                        .unwrap()
+                        .and_hms_opt(23, 15, 0)
+                        .unwrap(),
+                )
+                .unwrap(),
+            ),
+            stopped_at: UnixSeconds(
+                timestamp(
+                    NaiveDate::from_ymd_opt(2026, 9, 17)
+                        .unwrap()
+                        .and_hms_opt(1, 30, 0)
+                        .unwrap(),
+                )
+                .unwrap(),
+            ),
+        };
+
+        let date = NaiveDate::from_ymd_opt(2026, 8, 2).unwrap();
+        let edited = edit_date(original, date).unwrap();
+
+        assert_eq!(datetime(edited.started_at.0).date_naive(), date);
+        assert_eq!(
+            datetime(edited.stopped_at.0).date_naive(),
+            date.succ_opt().unwrap()
+        );
     }
 }
