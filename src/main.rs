@@ -16,19 +16,23 @@ mod desktop;
 mod github_activity;
 mod local_time;
 mod model;
+mod pagination;
 mod paths;
 mod reports;
 mod single_instance;
 mod storage;
 mod tray;
 
-use github_activity::{heat_color, CalendarHeatmap, CellFill, Segment};
+use github_activity::{
+    heat_color, CalendarHeatmap, CellFill, Segment, SelectionChange as CalendarSelectionChange,
+};
 use local_time::{datetime as local_datetime, TimeEndpoint};
 
 use model::{
     Activity, ActivityId, EntryId, Project, ProjectId, ProjectStatus, RgbColor, Store, TimeRange,
     UnixSeconds, MAX_ENTRY_SECONDS,
 };
+use pagination::Pagination;
 use paths::AppPaths;
 use reports::{
     activity_stats, activity_totals, add_interval_to_days, project_stats,
@@ -253,7 +257,8 @@ struct TimeTrackerApp {
     time_edit_buffers: BTreeMap<(EntryId, TimeEndpoint), String>,
     calendar: CalendarHeatmap,
     calendar_mode: CalendarMode,
-    entry_page: usize,
+    selected_date: Option<NaiveDate>,
+    entry_pagination: Pagination,
     last_icon_running: Option<bool>,
     tray: Option<tray::TrayController>,
     exit_requested: bool,
@@ -306,7 +311,8 @@ impl TimeTrackerApp {
             time_edit_buffers: BTreeMap::new(),
             calendar: CalendarHeatmap::default(),
             calendar_mode: CalendarMode::default(),
-            entry_page: 0,
+            selected_date: None,
+            entry_pagination: Pagination::new(ENTRIES_PER_PAGE),
             last_icon_running: None,
             tray,
             exit_requested: false,
@@ -469,9 +475,6 @@ impl TimeTrackerApp {
 
     fn entries_panel(&mut self, ui: &mut egui::Ui) {
         let entry_count = self.store.time_entries.len();
-        let page_count = entry_count.div_ceil(ENTRIES_PER_PAGE).max(1);
-        self.entry_page = self.entry_page.min(page_count - 1);
-
         let current_time = now();
         let activities = activity_options(&self.store, current_time);
         let projects = project_options(&self.store);
@@ -525,23 +528,6 @@ impl TimeTrackerApp {
         let mut time_commits = Vec::new();
         let mut current_week: Option<NaiveDate> = None;
         let can_start = self.store.active_entry.is_none();
-        let mut entries_by_day: BTreeMap<NaiveDate, Vec<usize>> = BTreeMap::new();
-        let page_start = self.entry_page * ENTRIES_PER_PAGE;
-        for index in (0..self.store.time_entries.len())
-            .rev()
-            .skip(page_start)
-            .take(ENTRIES_PER_PAGE)
-        {
-            let entry = &self.store.time_entries[index];
-            let date = local_datetime(entry.time.started_at.0).date_naive();
-            entries_by_day.entry(date).or_default().push(index);
-            let mut split = BTreeMap::new();
-            add_interval_to_days(&mut split, entry.time.started_at.0, entry.time.stopped_at.0);
-            for date in split.into_keys() {
-                entries_by_day.entry(date).or_default();
-            }
-        }
-        let display_days: Vec<NaiveDate> = entries_by_day.keys().copied().rev().collect();
 
         ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -550,7 +536,7 @@ impl TimeTrackerApp {
             )
             .show(ui, |ui| {
                 let activity_width = ui.available_width();
-                Frame::new()
+                let calendar_change = Frame::new()
                     .fill(Color32::WHITE)
                     .stroke(Stroke::new(1.0, BORDER))
                     .inner_margin(14.0)
@@ -577,6 +563,7 @@ impl TimeTrackerApp {
                         self.calendar.ui(
                             ui,
                             today,
+                            self.selected_date,
                             |date| match calendar_mode {
                                 CalendarMode::Time => day_totals
                                     .get(&date)
@@ -627,10 +614,45 @@ impl TimeTrackerApp {
                                     }
                                 }
                             },
-                        );
-                    });
+                        )
+                    })
+                    .inner;
+                match calendar_change {
+                    CalendarSelectionChange::Select(date) => {
+                        self.selected_date = Some(date);
+                        self.entry_pagination
+                            .set_start(entry_offset_for_date(&self.store.time_entries, date));
+                    }
+                    CalendarSelectionChange::Clear => {
+                        self.selected_date = None;
+                        self.entry_pagination.set_start(0);
+                    }
+                    CalendarSelectionChange::Unchanged => {}
+                }
                 ui.add_space(12.0);
-                pagination_controls(ui, &mut self.entry_page, entry_count);
+                pagination_controls(ui, &mut self.entry_pagination, entry_count);
+
+                let visible_entries = self.entry_pagination.visible_range(entry_count);
+                let mut entries_by_day: BTreeMap<NaiveDate, Vec<usize>> = BTreeMap::new();
+                for index in (0..self.store.time_entries.len())
+                    .rev()
+                    .skip(visible_entries.start)
+                    .take(visible_entries.len())
+                {
+                    let entry = &self.store.time_entries[index];
+                    let date = local_datetime(entry.time.started_at.0).date_naive();
+                    entries_by_day.entry(date).or_default().push(index);
+                    let mut split = BTreeMap::new();
+                    add_interval_to_days(
+                        &mut split,
+                        entry.time.started_at.0,
+                        entry.time.stopped_at.0,
+                    );
+                    for date in split.into_keys() {
+                        entries_by_day.entry(date).or_default();
+                    }
+                }
+                let display_days: Vec<NaiveDate> = entries_by_day.keys().copied().rev().collect();
 
                 for date in display_days {
                     let entry_week = week_start(date);
@@ -749,7 +771,7 @@ impl TimeTrackerApp {
                 }
 
                 ui.add_space(16.0);
-                pagination_controls(ui, &mut self.entry_page, entry_count);
+                pagination_controls(ui, &mut self.entry_pagination, entry_count);
             });
         if let Some(entry_id) = delete {
             self.store.remove_entry(entry_id);
@@ -1316,15 +1338,14 @@ impl eframe::App for TimeTrackerApp {
     }
 }
 
-fn pagination_controls(ui: &mut egui::Ui, page: &mut usize, total_entries: usize) {
-    let page_count = total_entries.div_ceil(ENTRIES_PER_PAGE).max(1);
-    *page = (*page).min(page_count - 1);
+fn pagination_controls(ui: &mut egui::Ui, pagination: &mut Pagination, total_entries: usize) {
+    let visible = pagination.visible_range(total_entries);
     let first = if total_entries == 0 {
         0
     } else {
-        *page * ENTRIES_PER_PAGE + 1
+        visible.start + 1
     };
-    let last = ((*page + 1) * ENTRIES_PER_PAGE).min(total_entries);
+    let last = visible.end;
 
     ui.horizontal(|ui| {
         ui.label(
@@ -1333,22 +1354,33 @@ fn pagination_controls(ui: &mut egui::Ui, page: &mut usize, total_entries: usize
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui
-                .add_enabled(*page + 1 < page_count, Button::new("Next"))
+                .add_enabled(pagination.has_next(total_entries), Button::new("Next"))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                *page += 1;
+                pagination.next(total_entries);
             }
-            ui.label(format!("Page {} of {page_count}", *page + 1));
             if ui
-                .add_enabled(*page > 0, Button::new("Previous"))
+                .add_enabled(pagination.has_previous(), Button::new("Previous"))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                *page -= 1;
+                pagination.previous();
             }
         });
     });
+}
+
+/// Returns the number of newest-first entries to skip so the list begins at
+/// the newest entry on `date`, the nearest older entry, or the oldest entry if
+/// the selected date predates the entire history.
+fn entry_offset_for_date(entries: &[model::TimeEntry], date: NaiveDate) -> usize {
+    let offset = entries
+        .iter()
+        .rev()
+        .take_while(|entry| local_datetime(entry.time.started_at.0).date_naive() > date)
+        .count();
+    offset.min(entries.len().saturating_sub(1))
 }
 
 fn activity_options(store: &Store, now: i64) -> Vec<ActivityOption> {
@@ -1753,5 +1785,49 @@ mod tests {
         assert_eq!(format_stat_duration(300 * 3600 + 42 * 60), "300 hours");
         assert_eq!(format_stat_duration(30 * 60 + 42), "30 minutes");
         assert_eq!(format_stat_duration(42), "42 seconds");
+    }
+
+    #[test]
+    fn calendar_date_anchors_at_the_newest_entry_on_or_before_that_date() {
+        let dates = [(14, 9), (15, 10), (15, 16), (17, 8)];
+        let entries: Vec<_> = dates
+            .into_iter()
+            .enumerate()
+            .map(|(index, (day, hour))| {
+                let started_at = local_time::timestamp(
+                    NaiveDate::from_ymd_opt(2026, 9, day)
+                        .unwrap()
+                        .and_hms_opt(hour, 0, 0)
+                        .unwrap(),
+                )
+                .unwrap();
+                model::TimeEntry {
+                    id: EntryId(index as u64 + 1),
+                    activity: ActivityId(0),
+                    project: None,
+                    time: TimeRange {
+                        started_at: UnixSeconds(started_at),
+                        stopped_at: UnixSeconds(started_at + 60),
+                    },
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            entry_offset_for_date(&entries, NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()),
+            1
+        );
+        assert_eq!(
+            entry_offset_for_date(&entries, NaiveDate::from_ymd_opt(2026, 9, 16).unwrap()),
+            1
+        );
+        assert_eq!(
+            entry_offset_for_date(&entries, NaiveDate::from_ymd_opt(2026, 9, 14).unwrap()),
+            3
+        );
+        assert_eq!(
+            entry_offset_for_date(&entries, NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()),
+            3
+        );
     }
 }

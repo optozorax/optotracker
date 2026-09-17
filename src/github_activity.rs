@@ -20,6 +20,14 @@ pub enum CellFill<'a> {
     Segmented(&'a [Segment]),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectionChange {
+    #[default]
+    Unchanged,
+    Select(NaiveDate),
+    Clear,
+}
+
 /// Reusable GitHub-style calendar heatmap state.
 ///
 /// The caller supplies cell presentation and tooltip content, so the widget
@@ -35,9 +43,10 @@ impl CalendarHeatmap {
         &mut self,
         ui: &mut egui::Ui,
         today: NaiveDate,
+        selected: Option<NaiveDate>,
         fill: impl Fn(NaiveDate) -> CellFill<'a>,
         tooltip: impl Fn(&mut egui::Ui, NaiveDate),
-    ) {
+    ) -> SelectionChange {
         let available = ui.available_width().max(420.0);
         let step = ((available - LABEL_WIDTH) / WEEKS as f32).max(7.0);
         let gap = (step * 0.13).clamp(2.0, 4.0);
@@ -53,8 +62,6 @@ impl CalendarHeatmap {
                 self.week_offset = (self.week_offset + weeks).clamp(-5_200, 5_200);
                 self.drag_remainder -= weeks as f32 * step;
             }
-        } else if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
 
         let year_start = NaiveDate::from_ymd_opt(today.year(), 1, 1).expect("valid year start");
@@ -65,6 +72,9 @@ impl CalendarHeatmap {
         let separator = Color32::from_rgb(31, 35, 40);
         let month_stroke = Stroke::new(1.0, separator);
         let year_stroke = Stroke::new(2.0, separator);
+        let selection_color = ui.visuals().selection.bg_fill;
+        let pointer_position = ui.ctx().pointer_hover_pos();
+        let mut hovered_date = None;
 
         for week in 0..WEEKS {
             for weekday in 0..DAYS {
@@ -99,7 +109,13 @@ impl CalendarHeatmap {
                     response.id.with(date),
                     Sense::hover(),
                 );
-                if cell_response.hovered() && !response.dragged() {
+                let date_is_hovered = date <= today
+                    && pointer_position
+                        .is_some_and(|position| cell.expand(gap * 0.5).contains(position));
+                if date_is_hovered {
+                    hovered_date = Some(date);
+                }
+                if cell_response.hovered() && date <= today && !response.dragged() {
                     ui.painter().rect_stroke(
                         cell.expand(1.0),
                         2.0,
@@ -107,6 +123,14 @@ impl CalendarHeatmap {
                         StrokeKind::Outside,
                     );
                     cell_response.on_hover_ui_at_pointer(|ui| tooltip(ui, date));
+                }
+                if selected == Some(date) {
+                    ui.painter().rect_stroke(
+                        cell.expand(1.0),
+                        2.0,
+                        Stroke::new(2.0, selection_color),
+                        StrokeKind::Outside,
+                    );
                 }
             }
         }
@@ -118,6 +142,16 @@ impl CalendarHeatmap {
             step,
             (self.week_offset == 0).then_some(today.year()),
         );
+
+        if selected.is_some() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            SelectionChange::Clear
+        } else if response.clicked() {
+            hovered_date
+                .map(SelectionChange::Select)
+                .unwrap_or(SelectionChange::Clear)
+        } else {
+            SelectionChange::Unchanged
+        }
     }
 
     fn paint_calendar_boundaries(

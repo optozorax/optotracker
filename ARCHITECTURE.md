@@ -22,6 +22,8 @@ rules to maintain.
 - `github_activity.rs` is a reusable egui calendar heatmap. The caller supplies
   cell fills and tooltip contents, so it does not know about trackers, projects,
   activities, or persistence.
+- `pagination.rs` is reusable offset-based pagination. Its starting position
+  may be any item rather than only a page-size boundary.
 - `paths.rs` resolves application paths once. `desktop.rs`, `tray.rs`,
   `single_instance.rs`, and the taskbar functions in `app_icon.rs` are the only
   places that contain desktop or operating-system integration.
