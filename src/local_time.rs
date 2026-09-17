@@ -64,8 +64,7 @@ pub fn edit_time(
         TimeEndpoint::Start => original_start.time(),
         TimeEndpoint::Stop => original_stop.time(),
     };
-    let edited = NaiveTime::parse_from_str(edited_text.trim(), "%H:%M")
-        .map_err(|_| "Time must use HH:MM".to_owned())?
+    let edited = parse_time(edited_text)?
         .with_second(original_endpoint.second())
         .and_then(|time| time.with_nanosecond(original_endpoint.nanosecond()))
         .ok_or_else(|| "Time is out of range".to_owned())?;
@@ -99,6 +98,16 @@ pub fn edit_time(
         started_at: UnixSeconds(started_at),
         stopped_at: UnixSeconds(stopped_at),
     })
+}
+
+fn parse_time(text: &str) -> Result<NaiveTime, String> {
+    let text = text.trim();
+    let format = match text.as_bytes() {
+        [_, _, b':', _, _] => "%H:%M",
+        [_, _, _, _] => "%H%M",
+        _ => return Err("Time must use HH:MM or HHMM".to_owned()),
+    };
+    NaiveTime::parse_from_str(text, format).map_err(|_| "Time must use HH:MM or HHMM".to_owned())
 }
 
 #[cfg(test)]
@@ -188,5 +197,43 @@ mod tests {
             edit_time(original, TimeEndpoint::Start, "15:02").unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn compact_time_without_colon_is_accepted() {
+        let start = timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 16)
+                .unwrap()
+                .and_hms_opt(9, 15, 17)
+                .unwrap(),
+        )
+        .unwrap();
+        let stop = timestamp(
+            NaiveDate::from_ymd_opt(2026, 9, 16)
+                .unwrap()
+                .and_hms_opt(10, 30, 43)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let edited = edit_time(
+            TimeRange {
+                started_at: UnixSeconds(start),
+                stopped_at: UnixSeconds(stop),
+            },
+            TimeEndpoint::Start,
+            "0945",
+        )
+        .unwrap();
+
+        assert_eq!(datetime(edited.started_at.0).time().hour(), 9);
+        assert_eq!(datetime(edited.started_at.0).time().minute(), 45);
+        assert_eq!(datetime(edited.started_at.0).time().second(), 17);
+    }
+
+    #[test]
+    fn malformed_time_reports_both_accepted_formats() {
+        let error = parse_time("945").unwrap_err();
+        assert_eq!(error, "Time must use HH:MM or HHMM");
     }
 }
