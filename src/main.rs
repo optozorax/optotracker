@@ -589,7 +589,7 @@ impl TimeTrackerApp {
                             },
                             |ui, date| {
                                 ui.set_min_width(220.0);
-                                ui.label(date.format("%A, %B %-d, %Y").to_string());
+                                ui.label(local_time::format_date_with_weekday(date));
                                 ui.label(
                                     day_totals
                                         .get(&date)
@@ -1685,7 +1685,7 @@ fn stat_label(ui: &mut egui::Ui, label: &str, value: String) {
 
 fn format_stat_date(timestamp: Option<i64>) -> String {
     timestamp
-        .map(|value| local_datetime(value).format("%Y-%m-%d").to_string())
+        .map(|value| local_time::format_date(local_datetime(value).date_naive()))
         .unwrap_or_else(|| "-".to_owned())
 }
 
@@ -1695,7 +1695,7 @@ fn week_title(week: NaiveDate, this_week: NaiveDate) -> String {
     } else if week == this_week - ChronoDuration::weeks(1) {
         "Last week".to_owned()
     } else {
-        format!("Week of {}", week.format("%B %-d, %Y"))
+        format!("Week of {}", local_time::format_date(week))
     }
 }
 
@@ -1705,7 +1705,7 @@ fn day_title(date: NaiveDate, today: NaiveDate) -> String {
     } else if date == today - ChronoDuration::days(1) {
         "Yesterday".to_owned()
     } else {
-        date.format("%A, %B %-d, %Y").to_string()
+        local_time::format_date_with_weekday(date)
     }
 }
 
@@ -1727,7 +1727,10 @@ fn entry_date_picker(ui: &mut egui::Ui, entry_id: EntryId, time: TimeRange) -> O
     let response = ui
         .add(DatePickerButton::new(&mut selected, ("entry-date", entry_id)).year_range(2000..=3000))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("Change date ({})", original.format("%B %-d, %Y")));
+        .on_hover_text(format!(
+            "Change date ({})",
+            local_time::format_date(original)
+        ));
     response.changed().then_some(selected)
 }
 

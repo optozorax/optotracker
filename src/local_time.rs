@@ -23,6 +23,16 @@ pub fn datetime(seconds: i64) -> DateTime<Local> {
         .with_timezone(&Local)
 }
 
+/// Formats a local calendar date consistently in day-month-year order.
+pub fn format_date(date: NaiveDate) -> String {
+    date.format("%-d %b %Y").to_string()
+}
+
+/// Formats a local calendar date with its weekday in day-month-year order.
+pub fn format_date_with_weekday(date: NaiveDate) -> String {
+    date.format("%A, %-d %b %Y").to_string()
+}
+
 pub fn timestamp(value: NaiveDateTime) -> Result<i64, String> {
     match Local.from_local_datetime(&value) {
         LocalResult::Single(value) => Ok(value.timestamp()),
@@ -137,6 +147,13 @@ fn parse_time(text: &str) -> Result<NaiveTime, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dates_use_day_month_year_order() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 15).unwrap();
+        assert_eq!(format_date(date), "15 Sep 2026");
+        assert_eq!(format_date_with_weekday(date), "Tuesday, 15 Sep 2026");
+    }
 
     #[test]
     fn split_durations_add_up_to_the_original_interval() {

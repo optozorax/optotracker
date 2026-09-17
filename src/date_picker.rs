@@ -169,7 +169,7 @@ impl DatePickerPopup<'_> {
                 egui::vec2(156.0, 26.0),
                 Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
-                    ui.label(RichText::new(self.draft.format("%B %Y").to_string()).strong());
+                    ui.label(RichText::new(self.draft.format("%b %Y").to_string()).strong());
                 },
             );
             let next_month = shift_month(*self.draft, 1);
