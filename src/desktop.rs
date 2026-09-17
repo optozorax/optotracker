@@ -1,51 +1,34 @@
+//! Desktop integration boundary.
+//!
+//! The UI calls this module using resolved paths. Platform-specific code lives
+//! in the inner module and does not leak Windows APIs into the application.
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-pub const DATA_FILE: &str = "data.json";
-pub const PERSISTENCE_FILE: &str = "temp.ron";
-pub const EXECUTABLE_FILE: &str = "OptoTracker.exe";
+use crate::paths::AppPaths;
 
-pub fn app_directory() -> Result<PathBuf, String> {
-    directories::BaseDirs::new()
-        .map(|directories| directories.data_dir().join("OptoTracker"))
-        .ok_or_else(|| "Could not locate the current user's application-data folder".to_owned())
-}
-
-pub fn data_path() -> Result<PathBuf, String> {
-    Ok(app_directory()?.join(DATA_FILE))
-}
-
-pub fn persistence_path() -> Result<PathBuf, String> {
-    Ok(app_directory()?.join(PERSISTENCE_FILE))
-}
-
-pub fn installed_executable_path() -> Result<PathBuf, String> {
-    Ok(app_directory()?.join(EXECUTABLE_FILE))
-}
-
-pub fn install_current_executable() -> Result<PathBuf, String> {
+pub fn install_current_executable(paths: &AppPaths) -> Result<(), String> {
     let source = std::env::current_exe()
         .map_err(|error| format!("Could not locate the running executable: {error}"))?;
-    let destination = installed_executable_path()?;
-    fs::create_dir_all(app_directory()?)
+    fs::create_dir_all(&paths.directory)
         .map_err(|error| format!("Could not create the application folder: {error}"))?;
-    if !same_file(&source, &destination) {
-        fs::copy(&source, &destination)
+    if !same_file(&source, &paths.installed_executable) {
+        fs::copy(&source, &paths.installed_executable)
             .map_err(|error| format!("Could not install OptoTracker: {error}"))?;
     }
-    Ok(destination)
+    Ok(())
 }
 
-pub fn is_installed() -> bool {
-    installed_executable_path().is_ok_and(|path| path.is_file())
+pub fn is_installed(paths: &AppPaths) -> bool {
+    paths.installed_executable.is_file()
 }
 
-pub fn open_app_directory() -> Result<(), String> {
-    let directory = app_directory()?;
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
-    open::that(&directory)
-        .map_err(|error| format!("Could not open {}: {error}", directory.display()))
+pub fn open_app_directory(paths: &AppPaths) -> Result<(), String> {
+    fs::create_dir_all(&paths.directory)
+        .map_err(|error| format!("Could not create {}: {error}", paths.directory.display()))?;
+    open::that(&paths.directory)
+        .map_err(|error| format!("Could not open {}: {error}", paths.directory.display()))
 }
 
 fn same_file(left: &Path, right: &Path) -> bool {
@@ -56,8 +39,8 @@ fn same_file(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-mod windows_integration {
-    use super::{app_directory, installed_executable_path};
+mod platform {
+    use super::{install_current_executable, AppPaths};
     use std::os::windows::ffi::OsStrExt as _;
     use std::os::windows::process::CommandExt as _;
     use std::path::{Path, PathBuf};
@@ -88,13 +71,16 @@ mod windows_integration {
             .is_ok_and(|status| status.success())
     }
 
-    pub fn set_autorun(enabled: bool, start_minimized: bool) -> Result<(), String> {
+    pub fn set_autorun(
+        paths: &AppPaths,
+        enabled: bool,
+        start_minimized: bool,
+    ) -> Result<(), String> {
         let status = if enabled {
-            let executable = installed_executable_path()?;
             let command_line = if start_minimized {
-                format!("\"{}\" --minimized", executable.display())
+                format!("\"{}\" --minimized", paths.installed_executable.display())
             } else {
-                format!("\"{}\"", executable.display())
+                format!("\"{}\"", paths.installed_executable.display())
             };
             reg_command()
                 .args([
@@ -123,9 +109,8 @@ mod windows_integration {
         }
     }
 
-    pub fn create_desktop_shortcut() -> Result<(), String> {
-        let executable = super::install_current_executable()?;
-        let working_directory = app_directory()?;
+    pub fn create_desktop_shortcut(paths: &AppPaths) -> Result<(), String> {
+        install_current_executable(paths)?;
 
         // SAFETY: COM objects and the shell-allocated path are handled according
         // to their ownership contracts, and all path buffers remain alive for
@@ -143,23 +128,23 @@ mod windows_integration {
 
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
                 .map_err(|error| format!("Could not create a desktop shortcut: {error}"))?;
-            let executable_wide = wide_path(&executable);
-            let working_directory_wide = wide_path(&working_directory);
-            link.SetPath(PCWSTR(executable_wide.as_ptr()))
+            let executable = wide_path(&paths.installed_executable);
+            let working_directory = wide_path(&paths.directory);
+            link.SetPath(PCWSTR(executable.as_ptr()))
                 .map_err(|error| format!("Could not set the shortcut target: {error}"))?;
-            link.SetWorkingDirectory(PCWSTR(working_directory_wide.as_ptr()))
+            link.SetWorkingDirectory(PCWSTR(working_directory.as_ptr()))
                 .map_err(|error| format!("Could not set the shortcut folder: {error}"))?;
             link.SetDescription(windows::core::w!("Open OptoTracker"))
                 .map_err(|error| format!("Could not set the shortcut description: {error}"))?;
-            link.SetIconLocation(PCWSTR(executable_wide.as_ptr()), 0)
+            link.SetIconLocation(PCWSTR(executable.as_ptr()), 0)
                 .map_err(|error| format!("Could not set the shortcut icon: {error}"))?;
 
             let persistence: IPersistFile = link
                 .cast()
                 .map_err(|error| format!("Could not save the desktop shortcut: {error}"))?;
-            let shortcut_wide = wide_path(&shortcut);
+            let shortcut = wide_path(&shortcut);
             persistence
-                .Save(PCWSTR(shortcut_wide.as_ptr()), true)
+                .Save(PCWSTR(shortcut.as_ptr()), true)
                 .map_err(|error| format!("Could not save the desktop shortcut: {error}"))
         }
     }
@@ -170,18 +155,24 @@ mod windows_integration {
 }
 
 #[cfg(not(target_os = "windows"))]
-mod windows_integration {
+mod platform {
+    use super::AppPaths;
+
     pub fn autorun_enabled() -> bool {
         false
     }
 
-    pub fn set_autorun(_enabled: bool, _start_minimized: bool) -> Result<(), String> {
+    pub fn set_autorun(
+        _paths: &AppPaths,
+        _enabled: bool,
+        _start_minimized: bool,
+    ) -> Result<(), String> {
         Err("Autorun is currently supported only on Windows".to_owned())
     }
 
-    pub fn create_desktop_shortcut() -> Result<(), String> {
+    pub fn create_desktop_shortcut(_paths: &AppPaths) -> Result<(), String> {
         Err("Desktop shortcuts are currently supported only on Windows".to_owned())
     }
 }
 
-pub use windows_integration::{autorun_enabled, create_desktop_shortcut, set_autorun};
+pub use platform::{autorun_enabled, create_desktop_shortcut, set_autorun};

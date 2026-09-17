@@ -12,11 +12,12 @@ use eframe::egui::{
 };
 
 mod app_icon;
+mod desktop;
 mod github_activity;
 mod local_time;
 mod model;
+mod paths;
 mod reports;
-mod settings;
 mod single_instance;
 mod storage;
 mod tray;
@@ -28,6 +29,7 @@ use model::{
     Activity, ActivityId, EntryId, Project, ProjectId, ProjectStatus, RgbColor, Store, TimeRange,
     UnixSeconds, MAX_ENTRY_SECONDS,
 };
+use paths::AppPaths;
 use reports::{
     activity_stats, activity_totals, add_interval_to_days, project_stats,
     project_totals_by_local_day, totals_by_local_day, totals_by_week, week_start, UsageStats,
@@ -70,25 +72,19 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     }
-    let store_path = match store_path.map(Ok).unwrap_or_else(settings::data_path) {
-        Ok(path) => path,
+    let app_paths = match AppPaths::discover() {
+        Ok(paths) => paths,
         Err(error) => {
             single_instance::SingleInstanceGuard::show_error_message(&error);
             return Ok(());
         }
     };
+    let store_path = store_path.unwrap_or_else(|| app_paths.data.clone());
     let repository = JsonStore::new(store_path);
     let store = match repository.load() {
         Ok(store) => store,
         Err(error) => {
             single_instance::SingleInstanceGuard::show_error_message(&error.to_string());
-            return Ok(());
-        }
-    };
-    let persistence_path = match settings::persistence_path() {
-        Ok(path) => path,
-        Err(error) => {
-            single_instance::SingleInstanceGuard::show_error_message(&error);
             return Ok(());
         }
     };
@@ -99,7 +95,7 @@ fn main() -> eframe::Result {
             .with_visible(!start_minimized)
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([820.0, 560.0]),
-        persistence_path: Some(persistence_path),
+        persistence_path: Some(app_paths.persistence.clone()),
         ..Default::default()
     };
     eframe::run_native(
@@ -111,6 +107,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(TimeTrackerApp::load(
                 repository.clone(),
                 store.clone(),
+                app_paths.clone(),
                 cc.storage,
                 start_minimized,
                 &cc.egui_ctx,
@@ -249,6 +246,7 @@ struct ProjectContribution {
 
 struct TimeTrackerApp {
     repository: JsonStore,
+    app_paths: AppPaths,
     store: Store,
     last_saved_store: Store,
     view: AppView,
@@ -275,6 +273,7 @@ impl TimeTrackerApp {
     fn load(
         repository: JsonStore,
         store: Store,
+        app_paths: AppPaths,
         storage: Option<&dyn eframe::Storage>,
         start_minimized: bool,
         ctx: &egui::Context,
@@ -294,12 +293,13 @@ impl TimeTrackerApp {
         if start_minimized && tray.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
-        let autorun_enabled = settings::autorun_enabled();
+        let autorun_enabled = desktop::autorun_enabled();
         if autorun_enabled {
-            let _ = settings::set_autorun(true, preferences.start_minimized_on_autorun);
+            let _ = desktop::set_autorun(&app_paths, true, preferences.start_minimized_on_autorun);
         }
         Self {
             repository,
+            app_paths,
             last_saved_store: store.clone(),
             store,
             view: AppView::Entries,
@@ -1033,17 +1033,17 @@ impl TimeTrackerApp {
             .show(ui, |ui| {
                 ui.set_min_width((width - 38.0).max(0.0));
                 ui.heading("Application folder");
-                ui.label(RichText::new(self.repository.path().display().to_string()).monospace());
+                ui.label(RichText::new(self.app_paths.directory.display().to_string()).monospace());
                 ui.label(
                     RichText::new(
-                        "Tracker data and UI persistence are stored directly in this folder.",
+                        "The installed executable and UI persistence are stored in this folder.",
                     )
                     .color(Color32::from_gray(105)),
                 );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .button(if settings::is_installed() {
+                        .button(if desktop::is_installed(&self.app_paths) {
                             "Update installed app"
                         } else {
                             "Install OptoTracker here"
@@ -1051,11 +1051,12 @@ impl TimeTrackerApp {
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
-                        match settings::install_current_executable() {
-                            Ok(_) => {
+                        match desktop::install_current_executable(&self.app_paths) {
+                            Ok(()) => {
                                 self.settings_message = "OptoTracker was installed.".to_owned();
                                 if self.autorun_enabled {
-                                    if let Err(error) = settings::set_autorun(
+                                    if let Err(error) = desktop::set_autorun(
+                                        &self.app_paths,
                                         true,
                                         self.preferences.start_minimized_on_autorun,
                                     ) {
@@ -1071,7 +1072,7 @@ impl TimeTrackerApp {
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
-                        if let Err(error) = settings::open_app_directory() {
+                        if let Err(error) = desktop::open_app_directory(&self.app_paths) {
                             self.settings_message = error;
                         }
                     }
@@ -1080,7 +1081,7 @@ impl TimeTrackerApp {
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
-                        match settings::create_desktop_shortcut() {
+                        match desktop::create_desktop_shortcut(&self.app_paths) {
                             Ok(()) => {
                                 self.settings_message = "Desktop shortcut created.".to_owned();
                             }
@@ -1089,10 +1090,10 @@ impl TimeTrackerApp {
                     }
                 });
                 ui.add_space(10.0);
-                if settings::is_installed() {
+                if desktop::is_installed(&self.app_paths) {
                     ui.horizontal(|ui| {
                         ui.label("Installed executable:");
-                        ui.label(RichText::new(settings::EXECUTABLE_FILE).monospace());
+                        ui.label(RichText::new(paths::EXECUTABLE_FILE).monospace());
                     });
                 } else {
                     ui.label("OptoTracker is not installed in this folder yet.");
@@ -1105,7 +1106,9 @@ impl TimeTrackerApp {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Persistence:");
-                    ui.label(RichText::new(settings::PERSISTENCE_FILE).monospace());
+                    ui.label(
+                        RichText::new(self.app_paths.persistence.display().to_string()).monospace(),
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.label("Weekly backups:");
@@ -1130,11 +1133,15 @@ impl TimeTrackerApp {
                     .changed()
                 {
                     let result = if autorun {
-                        settings::install_current_executable().and_then(|_| {
-                            settings::set_autorun(true, self.preferences.start_minimized_on_autorun)
+                        desktop::install_current_executable(&self.app_paths).and_then(|()| {
+                            desktop::set_autorun(
+                                &self.app_paths,
+                                true,
+                                self.preferences.start_minimized_on_autorun,
+                            )
                         })
                     } else {
-                        settings::set_autorun(false, false)
+                        desktop::set_autorun(&self.app_paths, false, false)
                     };
                     match result {
                         Ok(()) => {
@@ -1156,7 +1163,11 @@ impl TimeTrackerApp {
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .changed();
                 if minimized_changed && self.autorun_enabled {
-                    match settings::set_autorun(true, self.preferences.start_minimized_on_autorun) {
+                    match desktop::set_autorun(
+                        &self.app_paths,
+                        true,
+                        self.preferences.start_minimized_on_autorun,
+                    ) {
                         Ok(()) => {
                             self.settings_message = "Autorun behavior updated.".to_owned();
                         }
