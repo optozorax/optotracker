@@ -134,6 +134,8 @@ pub enum ModelError {
     UnsupportedFormat(u32),
     #[error("entry ID {0} is duplicated or reserved")]
     InvalidEntryId(u64),
+    #[error("project and activity names cannot be empty")]
+    EmptyName,
     #[error("activity {0} does not exist")]
     MissingActivity(usize),
     #[error("project {0} does not exist")]
@@ -150,6 +152,8 @@ pub enum ModelError {
     ClockMovedBackwards,
     #[error("the entry ID space is exhausted")]
     EntryIdExhausted,
+    #[error("a timestamp is outside the supported range")]
+    TimestampOutOfRange,
 }
 
 impl Store {
@@ -169,6 +173,17 @@ impl Store {
         if self.format_version != CURRENT_FORMAT_VERSION {
             return Err(ModelError::UnsupportedFormat(self.format_version));
         }
+        if self
+            .projects
+            .iter()
+            .any(|project| project.name.trim().is_empty())
+            || self
+                .activities
+                .iter()
+                .any(|activity| activity.name.trim().is_empty())
+        {
+            return Err(ModelError::EmptyName);
+        }
 
         let mut entry_ids = BTreeSet::new();
         for entry in &self.time_entries {
@@ -176,7 +191,12 @@ impl Store {
                 return Err(ModelError::InvalidEntryId(entry.id.0));
             }
             self.validate_references(entry.activity, entry.project)?;
-            let duration = entry.time.stopped_at.0 - entry.time.started_at.0;
+            let duration = entry
+                .time
+                .stopped_at
+                .0
+                .checked_sub(entry.time.started_at.0)
+                .ok_or(ModelError::TimestampOutOfRange)?;
             if duration < 0 {
                 return Err(ModelError::NegativeDuration);
             }
@@ -219,8 +239,17 @@ impl Store {
         if now.0 < active.started_at.0 {
             return Err(ModelError::ClockMovedBackwards);
         }
-        let capped_at_limit = now.0 - active.started_at.0 > MAX_ENTRY_SECONDS;
-        let stopped_at = UnixSeconds(now.0.min(active.started_at.0 + MAX_ENTRY_SECONDS));
+        let elapsed = now
+            .0
+            .checked_sub(active.started_at.0)
+            .ok_or(ModelError::TimestampOutOfRange)?;
+        let deadline = active
+            .started_at
+            .0
+            .checked_add(MAX_ENTRY_SECONDS)
+            .ok_or(ModelError::TimestampOutOfRange)?;
+        let capped_at_limit = elapsed > MAX_ENTRY_SECONDS;
+        let stopped_at = UnixSeconds(now.0.min(deadline));
         let active = self.active_entry.take().expect("checked above");
         let entry_id = self.next_entry_id()?;
         self.time_entries.push(TimeEntry {

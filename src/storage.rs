@@ -222,4 +222,28 @@ mod tests {
         assert_eq!(repository.load().unwrap(), store);
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn invalid_save_does_not_replace_existing_contents() {
+        let directory = test_directory("invalid-save");
+        let path = directory.join("data.json");
+        let repository = JsonStore::new(path.clone());
+        let valid = Store {
+            activities: vec![Activity {
+                name: "Work".to_owned(),
+            }],
+            ..Store::default()
+        };
+        repository.save(&valid).unwrap();
+        let original = fs::read(&path).unwrap();
+
+        let mut invalid = valid;
+        invalid.activities[0].name.clear();
+        assert!(matches!(
+            repository.save(&invalid),
+            Err(SaveError::Invalid(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
