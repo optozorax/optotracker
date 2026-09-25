@@ -263,6 +263,11 @@ struct DateEditRequest {
     date: NaiveDate,
 }
 
+struct ActiveStartEdit {
+    original: UnixSeconds,
+    time: String,
+}
+
 struct ActivityOption {
     id: ActivityId,
     name: String,
@@ -296,6 +301,7 @@ struct TimeTrackerApp {
     new_project_color: [u8; 3],
     new_activity_name: String,
     time_edit_buffers: BTreeMap<(EntryId, TimeEndpoint), String>,
+    active_start_edit: Option<ActiveStartEdit>,
     calendar: CalendarHeatmap,
     calendar_mode: CalendarMode,
     selected_date: Option<NaiveDate>,
@@ -355,6 +361,7 @@ impl TimeTrackerApp {
             new_project_color: [104, 159, 56],
             new_activity_name: String::new(),
             time_edit_buffers: BTreeMap::new(),
+            active_start_edit: None,
             calendar: CalendarHeatmap::default(),
             calendar_mode: remembered.calendar_mode,
             selected_date: None,
@@ -381,6 +388,7 @@ impl TimeTrackerApp {
             Err(error) => {
                 self.store = self.last_saved_store.clone();
                 self.time_edit_buffers.clear();
+                self.active_start_edit = None;
                 self.message = format!("Save failed; change was reverted: {error}");
             }
         }
@@ -414,6 +422,7 @@ impl TimeTrackerApp {
         }
         self.draft_activity = activity;
         self.draft_project = project;
+        self.active_start_edit = None;
         self.save();
     }
 
@@ -429,6 +438,7 @@ impl TimeTrackerApp {
             }
         };
         self.time_edit_buffers.clear();
+        self.active_start_edit = None;
         self.draft_activity = active.activity;
         self.draft_project = active.project;
         self.save();
@@ -497,6 +507,7 @@ impl TimeTrackerApp {
                         );
 
                         ui.separator();
+                        self.active_start_field(ui);
                         let selector_width = 220.0 + 190.0 + ui.spacing().item_spacing.x;
                         ui.add_space((ui.available_width() - selector_width).max(0.0));
 
@@ -530,6 +541,61 @@ impl TimeTrackerApp {
             });
         if active_changed {
             self.save();
+        }
+    }
+
+    fn active_start_field(&mut self, ui: &mut egui::Ui) {
+        let Some(started_at) = self
+            .store
+            .active_entry
+            .as_ref()
+            .map(|entry| entry.started_at)
+        else {
+            self.active_start_edit = None;
+            return;
+        };
+        if self
+            .active_start_edit
+            .as_ref()
+            .is_none_or(|edit| edit.original != started_at)
+        {
+            let local = local_datetime(started_at.0);
+            self.active_start_edit = Some(ActiveStartEdit {
+                original: started_at,
+                time: local.format("%H:%M").to_string(),
+            });
+        }
+
+        let edit = self.active_start_edit.as_mut().expect("initialized above");
+        let response = ui
+            .add(
+                egui::TextEdit::singleline(&mut edit.time)
+                    .id_salt("active-start-time")
+                    .desired_width(52.0)
+                    .horizontal_align(Align::Center),
+            )
+            .on_hover_text("Start time (HH:MM); later times count as yesterday");
+        let shown = local_datetime(started_at.0).format("%H:%M").to_string();
+        let commit = response.lost_focus()
+            || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+        if commit && edit.time != shown {
+            let current_time = UnixSeconds(now());
+            let result = local_time::edit_active_start(started_at, current_time, &edit.time)
+                .and_then(|new_start| {
+                    self.store
+                        .set_timer_start(new_start, current_time)
+                        .map_err(|error| error.to_string())
+                });
+            match result {
+                Ok(()) => {
+                    self.active_start_edit = None;
+                    self.save();
+                }
+                Err(error) => {
+                    self.active_start_edit = None;
+                    self.message = error;
+                }
+            }
         }
     }
 

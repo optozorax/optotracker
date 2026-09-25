@@ -150,6 +150,10 @@ pub enum ModelError {
     NoActiveTimer,
     #[error("the system clock is earlier than the timer start")]
     ClockMovedBackwards,
+    #[error("the timer start cannot be in the future")]
+    TimerStartInFuture,
+    #[error("the timer start must be less than 24 hours ago")]
+    TimerStartTooOld,
     #[error("the entry ID space is exhausted")]
     EntryIdExhausted,
     #[error("a timestamp is outside the supported range")]
@@ -225,6 +229,33 @@ impl Store {
             project,
             started_at: now,
         });
+        Ok(())
+    }
+
+    /// Move a running timer's start without changing its activity or project.
+    pub fn set_timer_start(
+        &mut self,
+        started_at: UnixSeconds,
+        now: UnixSeconds,
+    ) -> Result<(), ModelError> {
+        if self.active_entry.is_none() {
+            return Err(ModelError::NoActiveTimer);
+        }
+        let elapsed = now
+            .0
+            .checked_sub(started_at.0)
+            .ok_or(ModelError::TimestampOutOfRange)?;
+        if elapsed < 0 {
+            return Err(ModelError::TimerStartInFuture);
+        }
+        if elapsed >= MAX_ENTRY_SECONDS {
+            return Err(ModelError::TimerStartTooOld);
+        }
+        let active = self
+            .active_entry
+            .as_mut()
+            .ok_or(ModelError::NoActiveTimer)?;
+        active.started_at = started_at;
         Ok(())
     }
 
@@ -362,6 +393,46 @@ mod tests {
                 .time
                 .duration_seconds(),
             Some(MAX_ENTRY_SECONDS as u64)
+        );
+    }
+
+    #[test]
+    fn changing_running_start_keeps_timer_active_and_validates_boundaries() {
+        let mut store = store_with_activity();
+        assert_eq!(
+            store.set_timer_start(UnixSeconds(700), UnixSeconds(1_000)),
+            Err(ModelError::NoActiveTimer)
+        );
+        store
+            .start_timer(ActivityId(0), None, UnixSeconds(1_000))
+            .unwrap();
+        store
+            .set_timer_start(UnixSeconds(700), UnixSeconds(1_000))
+            .unwrap();
+        assert_eq!(
+            store.active_entry.as_ref().unwrap().started_at,
+            UnixSeconds(700)
+        );
+        assert_eq!(
+            store.set_timer_start(UnixSeconds(1_001), UnixSeconds(1_000)),
+            Err(ModelError::TimerStartInFuture)
+        );
+        assert_eq!(
+            store.set_timer_start(UnixSeconds(1_000 - MAX_ENTRY_SECONDS), UnixSeconds(1_000)),
+            Err(ModelError::TimerStartTooOld)
+        );
+        assert_eq!(
+            store.active_entry.as_ref().unwrap().started_at,
+            UnixSeconds(700)
+        );
+        let outcome = store.stop_timer(UnixSeconds(1_100)).unwrap();
+        assert_eq!(
+            store
+                .entry(outcome.entry_id)
+                .unwrap()
+                .time
+                .duration_seconds(),
+            Some(400)
         );
     }
 }

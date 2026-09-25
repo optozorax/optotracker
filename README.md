@@ -20,12 +20,16 @@ cargo run --release -- path\to\store.json
 
 The current version can start and stop the single active timer, restart an old
 entry's project/activity combination, create projects and activities, change
-the activity or project of a running or completed entry, edit each `HH:MM`
-value directly in an always-visible text field, and delete completed entries.
-Hidden seconds are preserved when editing minutes. A stop time earlier than its
-start is interpreted as the following day. Timers and edited entries are limited
-to 24 hours; a forgotten running timer stops at that limit. Day and week totals
-split overnight entries at the computer's local midnight. The full-width
+the activity or project of a running or completed entry, and adjust a running
+timer's start `HH:MM` time in the timer row without stopping it. A time later
+than the current clock time is treated as yesterday. You can also edit each
+completed entry's `HH:MM` value directly in an always-visible text field, and
+delete completed entries. Completed-entry edits preserve hidden seconds. A
+changed running-timer minute starts at zero seconds. A stop time earlier than
+its start is interpreted as the following day. Timers and edited entries are
+limited to 24 hours; a forgotten running timer stops at that limit. Day and
+week totals split overnight entries at the computer's local midnight. The
+full-width
 Projects and Activities views support renaming and show usage statistics;
 projects also support color and status editing. Every valid change is saved
 immediately, and a failed save reverts the in-memory change.
