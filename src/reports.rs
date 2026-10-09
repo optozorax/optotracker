@@ -20,51 +20,77 @@ pub struct UsageStats {
     pub related_count: usize,
 }
 
+/// Collects the statistics of every interval that is added to it.
+#[derive(Default)]
+struct Usage {
+    stats: UsageStats,
+    days: BTreeSet<NaiveDate>,
+}
+
+impl Usage {
+    fn add(&mut self, start: i64, stop: i64) {
+        let stats = &mut self.stats;
+        stats.entries += 1;
+        stats.total_seconds += (stop - start) as u64;
+        stats.first_used = Some(stats.first_used.map_or(start, |value| value.min(start)));
+        stats.last_used = Some(stats.last_used.map_or(start, |value| value.max(start)));
+        self.days
+            .extend(local_time::split_interval_by_day(start, stop).into_keys());
+    }
+
+    fn finish(mut self, related_count: usize) -> UsageStats {
+        self.stats.active_days = self.days.len();
+        self.stats.related_count = related_count;
+        self.stats
+    }
+}
+
 pub fn project_stats(store: &Store, project: ProjectId, now: i64) -> UsageStats {
-    let mut stats = UsageStats::default();
-    let mut days = BTreeSet::new();
-    let mut activity_totals: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut usage = Usage::default();
+    let mut activities = BTreeSet::new();
     for (activity, entry_project, start, stop) in usage_intervals(store, now) {
         if entry_project != Some(project) || stop <= start {
             continue;
         }
-        let seconds = (stop - start) as u64;
-        stats.entries += 1;
-        stats.total_seconds += seconds;
-        stats.first_used = Some(stats.first_used.map_or(start, |value| value.min(start)));
-        stats.last_used = Some(stats.last_used.map_or(start, |value| value.max(start)));
-        *activity_totals.entry(activity.0).or_default() += seconds;
-        days.extend(local_time::split_interval_by_day(start, stop).into_keys());
+        usage.add(start, stop);
+        activities.insert(activity.0);
     }
-    stats.active_days = days.len();
-    stats.related_count = activity_totals.len();
+    usage.finish(activities.len())
+}
+
+/// The statistics of one project split by activity, largest total first.
+/// Activities the project never used are left out.
+pub fn project_activity_stats(
+    store: &Store,
+    project: ProjectId,
+    now: i64,
+) -> Vec<(ActivityId, UsageStats)> {
+    let mut by_activity: BTreeMap<usize, Usage> = BTreeMap::new();
+    for (activity, entry_project, start, stop) in usage_intervals(store, now) {
+        if entry_project != Some(project) || stop <= start {
+            continue;
+        }
+        by_activity.entry(activity.0).or_default().add(start, stop);
+    }
+    let mut stats: Vec<(ActivityId, UsageStats)> = by_activity
+        .into_iter()
+        .map(|(activity, usage)| (ActivityId(activity), usage.finish(0)))
+        .collect();
+    stats.sort_by_key(|(_, stats)| std::cmp::Reverse(stats.total_seconds));
     stats
 }
 
 pub fn activity_stats(store: &Store, activity: ActivityId, now: i64) -> UsageStats {
-    let mut stats = UsageStats::default();
-    let mut days = BTreeSet::new();
-    let mut project_totals: BTreeMap<Option<usize>, u64> = BTreeMap::new();
+    let mut usage = Usage::default();
+    let mut projects = BTreeSet::new();
     for (entry_activity, project, start, stop) in usage_intervals(store, now) {
         if entry_activity != activity || stop <= start {
             continue;
         }
-        let seconds = (stop - start) as u64;
-        stats.entries += 1;
-        stats.total_seconds += seconds;
-        stats.first_used = Some(stats.first_used.map_or(start, |value| value.min(start)));
-        stats.last_used = Some(stats.last_used.map_or(start, |value| value.max(start)));
-        *project_totals
-            .entry(project.map(|project| project.0))
-            .or_default() += seconds;
-        days.extend(local_time::split_interval_by_day(start, stop).into_keys());
+        usage.add(start, stop);
+        projects.extend(project.map(|project| project.0));
     }
-    stats.active_days = days.len();
-    stats.related_count = project_totals
-        .keys()
-        .filter(|project| project.is_some())
-        .count();
-    stats
+    usage.finish(projects.len())
 }
 
 pub fn activity_totals(store: &Store, now: i64) -> Vec<u64> {
@@ -219,5 +245,64 @@ mod tests {
             totals_by_week(&totals),
             BTreeMap::from([(week_start(first), 75 * 60)])
         );
+    }
+
+    #[test]
+    fn project_activities_cover_only_that_project_and_start_with_the_largest() {
+        let day = NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
+        let local = |hour: u32, minute: u32| {
+            local_time::timestamp(day.and_hms_opt(hour, minute, 0).unwrap()).unwrap()
+        };
+        let entry = |id, activity, project, start, stop| TimeEntry {
+            id: EntryId(id),
+            activity: ActivityId(activity),
+            project,
+            time: TimeRange {
+                started_at: UnixSeconds(start),
+                stopped_at: UnixSeconds(stop),
+            },
+        };
+        let project = Some(ProjectId(0));
+        let store = Store {
+            time_entries: vec![
+                entry(1, 0, project, local(9, 0), local(9, 30)),
+                entry(2, 1, project, local(10, 0), local(11, 0)),
+                entry(3, 0, Some(ProjectId(1)), local(12, 0), local(14, 0)),
+                entry(4, 1, None, local(15, 0), local(16, 0)),
+            ],
+            active_entry: Some(ActiveTimeEntry {
+                activity: ActivityId(1),
+                project,
+                started_at: UnixSeconds(local(17, 0)),
+            }),
+            ..Store::default()
+        };
+
+        let activities = project_activity_stats(&store, ProjectId(0), local(17, 15));
+        let summary: Vec<(ActivityId, u64, usize, usize)> = activities
+            .iter()
+            .map(|(activity, stats)| {
+                (
+                    *activity,
+                    stats.total_seconds,
+                    stats.entries,
+                    stats.active_days,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (ActivityId(1), 75 * 60, 2, 1),
+                (ActivityId(0), 30 * 60, 1, 1)
+            ]
+        );
+        assert_eq!(activities[0].1.first_used, Some(local(10, 0)));
+        assert_eq!(activities[0].1.last_used, Some(local(17, 0)));
+
+        let whole = project_stats(&store, ProjectId(0), local(17, 15));
+        assert_eq!(whole.total_seconds, 105 * 60);
+        assert_eq!(whole.related_count, 2);
+        assert!(project_activity_stats(&store, ProjectId(2), local(17, 15)).is_empty());
     }
 }

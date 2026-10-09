@@ -31,7 +31,8 @@ limited to 24 hours; a forgotten running timer stops at that limit. Day and
 week totals split overnight entries at the computer's local midnight. The
 full-width
 Projects and Activities views support renaming, color editing, and usage statistics;
-projects also support status editing. The calendar shows the current
+projects also support status editing, and a project's row can be expanded to
+show the same statistics for each of its activities. The calendar shows the current
 year, preceded by earlier weeks when the window is wide enough for them, and
 can be dragged or paged in either direction. It can show time intensity,
 project colors, or activity colors; colored cells show each day's time proportions.

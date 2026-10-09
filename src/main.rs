@@ -37,8 +37,8 @@ use model::{
 use pagination::Pagination;
 use paths::AppPaths;
 use reports::{
-    activity_stats, activity_totals, add_interval_to_days, project_stats, totals_by_local_day,
-    totals_by_week, week_start, UsageStats,
+    activity_stats, activity_totals, add_interval_to_days, project_activity_stats, project_stats,
+    totals_by_local_day, totals_by_week, week_start, UsageStats,
 };
 use storage::JsonStore;
 
@@ -63,6 +63,8 @@ const TIMER_HEIGHT: f32 = 34.0;
 const TIMER_BUTTON_WIDTH: f32 = 84.0;
 const TIME_FIELD_WIDTH: f32 = 50.0;
 const NAME_FIELD_WIDTH: f32 = 180.0;
+/// Room for "100%" in the column before the totals.
+const SHARE_WIDTH: f32 = 38.0;
 // Room for everything to the right of a row's two drop-downs.
 const TIMER_CONTROLS_WIDTH: f32 = 264.0;
 const ENTRY_CONTROLS_WIDTH: f32 = 292.0;
@@ -1216,10 +1218,15 @@ impl TimeTrackerApp {
         usage_table(
             ui,
             "projects",
-            &["", "Project", "Status"],
+            &["", "", "Project", "Status"],
             "Activities",
             |ui| {
                 for index in (0..self.store.projects.len()).rev() {
+                    let expanded = disclosure_button(
+                        ui,
+                        egui::Id::new(("project-activities", index)),
+                        stats[index].entries > 0,
+                    );
                     let project = &mut self.store.projects[index];
                     changed |= color_cell(ui, &mut project.color);
                     let name_color = match project.status {
@@ -1235,9 +1242,34 @@ impl TimeTrackerApp {
                                 .text_color(name_color),
                         )
                         .changed();
-                    changed |= project_status_combo(ui, index, &mut project.status);
+                    let status = project_status_combo(ui, index, &mut project.status);
+                    changed |= status.changed();
                     usage_cells(ui, &stats[index], largest_total, color(project.color));
+                    number_cell(ui, stats[index].related_count.to_string());
                     ui.end_row();
+
+                    if expanded {
+                        let activities =
+                            project_activity_stats(&self.store, ProjectId(index), current_time);
+                        let largest_total = activities
+                            .first()
+                            .map_or(0, |(_, stats)| stats.total_seconds);
+                        // The names may use the room that the status leaves
+                        // in front of the shares.
+                        let name_right = status.rect.right() - SHARE_WIDTH;
+                        for (id, usage) in &activities {
+                            let activity = &self.store.activities[id.0];
+                            ui.label("");
+                            ui.label("");
+                            let swatch = Swatch::Activity(color(activity.color));
+                            overflowing_name(ui, swatch, &activity.name, name_right);
+                            let share =
+                                format_share(usage.total_seconds, stats[index].total_seconds);
+                            number_cell(ui, RichText::new(share).weak());
+                            usage_cells(ui, usage, largest_total, color(activity.color));
+                            ui.end_row();
+                        }
+                    }
                 }
             },
         );
@@ -1306,6 +1338,7 @@ impl TimeTrackerApp {
                     )
                     .changed();
                 usage_cells(ui, &stats[index], largest_total, color(activity.color));
+                number_cell(ui, stats[index].related_count.to_string());
                 ui.end_row();
             }
         });
@@ -2138,9 +2171,13 @@ fn cross_icon_button(ui: &mut egui::Ui) -> bool {
     response.on_hover_text("Delete this entry").clicked()
 }
 
-fn project_status_combo(ui: &mut egui::Ui, index: usize, status: &mut ProjectStatus) -> bool {
+fn project_status_combo(
+    ui: &mut egui::Ui,
+    index: usize,
+    status: &mut ProjectStatus,
+) -> egui::Response {
     let before = *status;
-    ComboBox::from_id_salt(("project-status", index))
+    let mut response = ComboBox::from_id_salt(("project-status", index))
         .width(84.0)
         .selected_text(match status {
             ProjectStatus::Active => "Active",
@@ -2152,7 +2189,81 @@ fn project_status_combo(ui: &mut egui::Ui, index: usize, status: &mut ProjectSta
         })
         .response
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    *status != before
+    if *status != before {
+        response.mark_changed();
+    }
+    response
+}
+
+/// A triangle that shows or hides the rows below it. Like a collapsing header
+/// it keeps its state in egui's memory. Returns whether the rows are shown.
+fn disclosure_button(ui: &mut egui::Ui, id: egui::Id, enabled: bool) -> bool {
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    let (response, color) = quiet_icon_button(ui, enabled, TEXT);
+    if response.clicked() {
+        state.toggle(ui);
+        state.store(ui.ctx());
+    }
+    // It points right while closed and turns down as it opens.
+    let angle = egui::remap(
+        state.openness(ui.ctx()),
+        0.0..=1.0,
+        -std::f32::consts::FRAC_PI_2..=0.0,
+    );
+    let rotation = egui::emath::Rot2::from_angle(angle);
+    let center = response.rect.center();
+    let points = [
+        egui::vec2(-4.5, -2.5),
+        egui::vec2(4.5, -2.5),
+        egui::vec2(0.0, 3.5),
+    ]
+    .map(|offset| center + rotation * offset);
+    ui.painter().add(egui::Shape::convex_polygon(
+        points.to_vec(),
+        color,
+        Stroke::NONE,
+    ));
+    response.on_hover_text(if state.is_open() {
+        "Hide the activities"
+    } else {
+        "Show the time of each activity"
+    });
+    enabled && state.is_open()
+}
+
+/// A swatch and a name in a table cell. A name wider than its column runs on
+/// over the cells that follow, as far as `right`.
+fn overflowing_name(ui: &mut egui::Ui, swatch: Swatch, name: &str, right: f32) {
+    // The margin of a text field, to line up with the names in those.
+    let swatch_left = ui.cursor().left() + 4.0;
+    let text_left = swatch_left + Swatch::SIZE + 6.0;
+    let galley = egui::WidgetText::from(name).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        (right - text_left).max(0.0),
+        egui::TextStyle::Body,
+    );
+    let width = (text_left - ui.cursor().left() + galley.size().x).min(ui.available_width());
+    let size = egui::vec2(width, ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    swatch.paint(
+        ui.painter(),
+        egui::Rect::from_center_size(
+            egui::pos2(swatch_left + Swatch::SIZE * 0.5, rect.center().y),
+            egui::Vec2::splat(Swatch::SIZE),
+        ),
+    );
+    let text_top = rect.center().y - galley.size().y * 0.5;
+    let elided = galley.elided;
+    ui.painter().galley(
+        egui::pos2(text_left, text_top),
+        galley,
+        ui.visuals().text_color(),
+    );
+    if elided {
+        response.on_hover_text(name);
+    }
 }
 
 /// The names behind the colors of the calendar, ordered by how much of the
@@ -2293,6 +2404,7 @@ fn usage_table(
         });
 }
 
+/// The statistics columns of one row, up to the count that ends it.
 fn usage_cells(ui: &mut egui::Ui, stats: &UsageStats, largest_total: u64, bar: Color32) {
     number_cell(ui, format_stat_duration(stats.total_seconds));
     let share = if largest_total == 0 {
@@ -2305,7 +2417,6 @@ fn usage_cells(ui: &mut egui::Ui, stats: &UsageStats, largest_total: u64, bar: C
     number_cell(ui, stats.active_days.to_string());
     number_cell(ui, format_stat_date(stats.first_used));
     number_cell(ui, format_stat_date(stats.last_used));
-    number_cell(ui, stats.related_count.to_string());
 }
 
 fn largest_total(stats: &[UsageStats]) -> u64 {
@@ -2461,6 +2572,16 @@ fn format_stat_duration(seconds: u64) -> String {
             "{seconds} {}",
             if seconds == 1 { "second" } else { "seconds" }
         )
+    }
+}
+
+/// What part of `total` the given seconds are, in whole percent.
+fn format_share(seconds: u64, total: u64) -> String {
+    let percent = seconds as f64 * 100.0 / total.max(1) as f64;
+    if seconds > 0 && percent < 1.0 {
+        "<1%".to_owned()
+    } else {
+        format!("{percent:.0}%")
     }
 }
 
