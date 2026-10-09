@@ -37,9 +37,8 @@ use model::{
 use pagination::Pagination;
 use paths::AppPaths;
 use reports::{
-    activity_stats, activity_totals, activity_totals_by_local_day, add_interval_to_days,
-    project_stats, project_totals_by_local_day, totals_by_local_day, totals_by_week, week_start,
-    UsageStats,
+    activity_stats, activity_totals, add_interval_to_days, project_stats, totals_by_local_day,
+    totals_by_week, week_start, UsageStats,
 };
 use storage::JsonStore;
 
@@ -612,31 +611,29 @@ impl TimeTrackerApp {
         let activities = activity_options(&self.store, current_time);
         let projects = project_options(&self.store);
         let day_totals = totals_by_local_day(&self.store, current_time);
-        let project_contributions: BTreeMap<NaiveDate, Vec<CalendarContribution>> =
-            project_totals_by_local_day(&self.store, current_time)
-                .into_iter()
-                .map(|(date, contributions)| {
-                    let segments = contributions
-                        .into_iter()
-                        .filter(|(_, seconds)| *seconds > 0)
-                        .map(|(project, seconds)| {
-                            let (label, segment_color) = project
-                                .and_then(|index| self.store.projects.get(index))
-                                .map(|project| (project.name.clone(), color(project.color)))
-                                .unwrap_or_else(|| {
-                                    ("No project".to_owned(), Color32::from_gray(125))
-                                });
-                            CalendarContribution {
-                                label,
-                                detail: format_duration(seconds),
-                                color: segment_color,
-                                weight: seconds as f32,
-                            }
-                        })
-                        .collect();
-                    (date, segments)
-                })
-                .collect();
+        let project_contributions: BTreeMap<NaiveDate, Vec<CalendarContribution>> = day_totals
+            .iter()
+            .map(|(&date, day)| {
+                let segments = day
+                    .by_project
+                    .iter()
+                    .filter(|(_, &seconds)| seconds > 0)
+                    .map(|(&project, &seconds)| {
+                        let (label, segment_color) = project
+                            .and_then(|index| self.store.projects.get(index))
+                            .map(|project| (project.name.clone(), color(project.color)))
+                            .unwrap_or_else(|| ("No project".to_owned(), Color32::from_gray(125)));
+                        CalendarContribution {
+                            label,
+                            detail: format_duration(seconds),
+                            color: segment_color,
+                            weight: seconds as f32,
+                        }
+                    })
+                    .collect();
+                (date, segments)
+            })
+            .collect();
         let project_segments: BTreeMap<NaiveDate, Vec<Segment>> = project_contributions
             .iter()
             .map(|(&date, contributions)| {
@@ -652,28 +649,28 @@ impl TimeTrackerApp {
                 )
             })
             .collect();
-        let activity_contributions: BTreeMap<NaiveDate, Vec<CalendarContribution>> =
-            activity_totals_by_local_day(&self.store, current_time)
-                .into_iter()
-                .map(|(date, totals)| {
-                    let contributions = totals
-                        .into_iter()
-                        .filter(|(_, seconds)| *seconds > 0)
-                        .filter_map(|(index, seconds)| {
-                            self.store
-                                .activities
-                                .get(index)
-                                .map(|activity| CalendarContribution {
-                                    label: activity.name.clone(),
-                                    detail: format_duration(seconds),
-                                    color: color(activity.color),
-                                    weight: seconds as f32,
-                                })
-                        })
-                        .collect();
-                    (date, contributions)
-                })
-                .collect();
+        let activity_contributions: BTreeMap<NaiveDate, Vec<CalendarContribution>> = day_totals
+            .iter()
+            .map(|(&date, day)| {
+                let contributions = day
+                    .by_activity
+                    .iter()
+                    .filter(|(_, &seconds)| seconds > 0)
+                    .filter_map(|(&index, &seconds)| {
+                        self.store
+                            .activities
+                            .get(index)
+                            .map(|activity| CalendarContribution {
+                                label: activity.name.clone(),
+                                detail: format_duration(seconds),
+                                color: color(activity.color),
+                                weight: seconds as f32,
+                            })
+                    })
+                    .collect();
+                (date, contributions)
+            })
+            .collect();
         let activity_segments: BTreeMap<NaiveDate, Vec<Segment>> = activity_contributions
             .iter()
             .map(|(&date, contributions)| {
@@ -744,9 +741,9 @@ impl TimeTrackerApp {
                             |date| match calendar_mode {
                                 CalendarMode::Time => day_totals
                                     .get(&date)
-                                    .map(|seconds| {
+                                    .map(|day| {
                                         CellFill::Solid(heat_color(
-                                            *seconds as f32 / (8.0 * 60.0 * 60.0),
+                                            day.seconds as f32 / (8.0 * 60.0 * 60.0),
                                         ))
                                     })
                                     .unwrap_or(CellFill::Empty),
@@ -765,8 +762,7 @@ impl TimeTrackerApp {
                                 ui.label(
                                     day_totals
                                         .get(&date)
-                                        .copied()
-                                        .map(format_duration)
+                                        .map(|day| format_duration(day.seconds))
                                         .unwrap_or_else(|| "No time tracked".to_owned()),
                                 );
                                 if calendar_mode != CalendarMode::Time {
@@ -874,7 +870,7 @@ impl TimeTrackerApp {
                                     total_label(
                                         ui,
                                         "Day total: ",
-                                        day_totals.get(&date).copied().unwrap_or(0),
+                                        day_totals.get(&date).map_or(0, |day| day.seconds),
                                         Color32::from_gray(90),
                                     );
                                 });

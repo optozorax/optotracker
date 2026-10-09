@@ -77,57 +77,27 @@ pub fn activity_totals(store: &Store, now: i64) -> Vec<u64> {
     totals
 }
 
-pub fn totals_by_local_day(store: &Store, now: i64) -> BTreeMap<NaiveDate, u64> {
-    let mut totals = BTreeMap::new();
-    for entry in &store.time_entries {
-        add_interval_to_days(
-            &mut totals,
-            entry.time.started_at.0,
-            entry.time.stopped_at.0,
-        );
-    }
-    if let Some(active) = &store.active_entry {
-        add_interval_to_days(&mut totals, active.started_at.0, now);
-    }
-    totals
+/// Time tracked on one local day, in total and broken down by project and by
+/// activity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DayTotals {
+    pub seconds: u64,
+    pub by_project: BTreeMap<Option<usize>, u64>,
+    pub by_activity: BTreeMap<usize, u64>,
 }
 
-pub fn project_totals_by_local_day(
-    store: &Store,
-    now: i64,
-) -> BTreeMap<NaiveDate, BTreeMap<Option<usize>, u64>> {
-    let mut totals = BTreeMap::new();
-    for entry in &store.time_entries {
-        add_project_interval_to_days(
-            &mut totals,
-            entry.project.map(|project| project.0),
-            entry.time.started_at.0,
-            entry.time.stopped_at.0,
-        );
-    }
-    if let Some(active) = &store.active_entry {
-        add_project_interval_to_days(
-            &mut totals,
-            active.project.map(|project| project.0),
-            active.started_at.0,
-            now,
-        );
-    }
-    totals
-}
-
-pub fn activity_totals_by_local_day(
-    store: &Store,
-    now: i64,
-) -> BTreeMap<NaiveDate, BTreeMap<usize, u64>> {
-    let mut totals = BTreeMap::new();
-    for (activity, _, start, stop) in usage_intervals(store, now) {
+/// Splitting an interval at local midnight is the expensive part of a scan, so
+/// every per-day breakdown is accumulated from the same pass.
+pub fn totals_by_local_day(store: &Store, now: i64) -> BTreeMap<NaiveDate, DayTotals> {
+    let mut totals: BTreeMap<NaiveDate, DayTotals> = BTreeMap::new();
+    for (activity, project, start, stop) in usage_intervals(store, now) {
         for (date, seconds) in local_time::split_interval_by_day(start, stop) {
-            *totals
-                .entry(date)
-                .or_insert_with(BTreeMap::new)
-                .entry(activity.0)
+            let day = totals.entry(date).or_default();
+            day.seconds += seconds;
+            *day.by_project
+                .entry(project.map(|project| project.0))
                 .or_default() += seconds;
+            *day.by_activity.entry(activity.0).or_default() += seconds;
         }
     }
     totals
@@ -139,10 +109,10 @@ pub fn add_interval_to_days(totals: &mut BTreeMap<NaiveDate, u64>, start: i64, s
     }
 }
 
-pub fn totals_by_week(day_totals: &BTreeMap<NaiveDate, u64>) -> BTreeMap<NaiveDate, u64> {
+pub fn totals_by_week(day_totals: &BTreeMap<NaiveDate, DayTotals>) -> BTreeMap<NaiveDate, u64> {
     let mut totals = BTreeMap::new();
-    for (&date, &seconds) in day_totals {
-        *totals.entry(week_start(date)).or_default() += seconds;
+    for (&date, day) in day_totals {
+        *totals.entry(week_start(date)).or_default() += day.seconds;
     }
     totals
 }
@@ -174,17 +144,6 @@ fn usage_intervals(
     completed.chain(active)
 }
 
-fn add_project_interval_to_days(
-    totals: &mut BTreeMap<NaiveDate, BTreeMap<Option<usize>, u64>>,
-    project: Option<usize>,
-    start: i64,
-    stop: i64,
-) {
-    for (date, seconds) in local_time::split_interval_by_day(start, stop) {
-        *totals.entry(date).or_default().entry(project).or_default() += seconds;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,7 +152,7 @@ mod tests {
     };
 
     #[test]
-    fn activity_calendar_splits_overnight_entries_and_includes_running_time() {
+    fn day_totals_split_overnight_entries_and_include_running_time() {
         let first = NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
         let second = first.succ_opt().unwrap();
         let local = |date: NaiveDate, hour: u32, minute: u32| {
@@ -225,7 +184,7 @@ mod tests {
             time_entries: vec![TimeEntry {
                 id: EntryId(1),
                 activity: ActivityId(0),
-                project: None,
+                project: Some(ProjectId(0)),
                 time: TimeRange {
                     started_at: UnixSeconds(start),
                     stopped_at: UnixSeconds(stop),
@@ -239,9 +198,26 @@ mod tests {
             ..Store::default()
         };
 
-        let totals = activity_totals_by_local_day(&store, now);
-        assert_eq!(totals[&first][&0], 30 * 60);
-        assert_eq!(totals[&second][&0], 30 * 60);
-        assert_eq!(totals[&second][&1], 15 * 60);
+        let totals = totals_by_local_day(&store, now);
+        assert_eq!(totals.len(), 2);
+        assert_eq!(totals[&first].seconds, 30 * 60);
+        assert_eq!(totals[&second].seconds, 45 * 60);
+        assert_eq!(totals[&first].by_activity, BTreeMap::from([(0, 30 * 60)]));
+        assert_eq!(
+            totals[&second].by_activity,
+            BTreeMap::from([(0, 30 * 60), (1, 15 * 60)])
+        );
+        assert_eq!(
+            totals[&first].by_project,
+            BTreeMap::from([(Some(0), 30 * 60)])
+        );
+        assert_eq!(
+            totals[&second].by_project,
+            BTreeMap::from([(Some(0), 30 * 60), (None, 15 * 60)])
+        );
+        assert_eq!(
+            totals_by_week(&totals),
+            BTreeMap::from([(week_start(first), 75 * 60)])
+        );
     }
 }
