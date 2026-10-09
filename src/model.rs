@@ -72,6 +72,16 @@ pub struct Project {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activity {
     pub name: String,
+    #[serde(default = "default_activity_color")]
+    pub color: RgbColor,
+}
+
+fn default_activity_color() -> RgbColor {
+    RgbColor {
+        red: 79,
+        green: 121,
+        blue: 203,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,6 +356,7 @@ mod tests {
         Store {
             activities: vec![Activity {
                 name: "Work".to_owned(),
+                color: default_activity_color(),
             }],
             ..Store::default()
         }

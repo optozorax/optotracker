@@ -37,8 +37,9 @@ use model::{
 use pagination::Pagination;
 use paths::AppPaths;
 use reports::{
-    activity_stats, activity_totals, add_interval_to_days, project_stats,
-    project_totals_by_local_day, totals_by_local_day, totals_by_week, week_start, UsageStats,
+    activity_stats, activity_totals, activity_totals_by_local_day, add_interval_to_days,
+    project_stats, project_totals_by_local_day, totals_by_local_day, totals_by_week, week_start,
+    UsageStats,
 };
 use storage::JsonStore;
 
@@ -200,6 +201,7 @@ enum CalendarMode {
     #[default]
     Time,
     Projects,
+    Activities,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -271,6 +273,7 @@ struct ActiveStartEdit {
 struct ActivityOption {
     id: ActivityId,
     name: String,
+    color: Color32,
     total_seconds: u64,
 }
 
@@ -281,7 +284,7 @@ struct ProjectOption {
     status: ProjectStatus,
 }
 
-struct ProjectContribution {
+struct CalendarContribution {
     label: String,
     detail: String,
     color: Color32,
@@ -300,6 +303,7 @@ struct TimeTrackerApp {
     new_project_name: String,
     new_project_color: [u8; 3],
     new_activity_name: String,
+    new_activity_color: [u8; 3],
     time_edit_buffers: BTreeMap<(EntryId, TimeEndpoint), String>,
     active_start_edit: Option<ActiveStartEdit>,
     calendar: CalendarHeatmap,
@@ -360,6 +364,7 @@ impl TimeTrackerApp {
             new_project_name: String::new(),
             new_project_color: [104, 159, 56],
             new_activity_name: String::new(),
+            new_activity_color: [79, 121, 203],
             time_edit_buffers: BTreeMap::new(),
             active_start_edit: None,
             calendar: CalendarHeatmap::default(),
@@ -605,7 +610,7 @@ impl TimeTrackerApp {
         let activities = activity_options(&self.store, current_time);
         let projects = project_options(&self.store);
         let day_totals = totals_by_local_day(&self.store, current_time);
-        let project_contributions: BTreeMap<NaiveDate, Vec<ProjectContribution>> =
+        let project_contributions: BTreeMap<NaiveDate, Vec<CalendarContribution>> =
             project_totals_by_local_day(&self.store, current_time)
                 .into_iter()
                 .map(|(date, contributions)| {
@@ -619,7 +624,7 @@ impl TimeTrackerApp {
                                 .unwrap_or_else(|| {
                                     ("No project".to_owned(), Color32::from_gray(125))
                                 });
-                            ProjectContribution {
+                            CalendarContribution {
                                 label,
                                 detail: format_duration(seconds),
                                 color: segment_color,
@@ -631,6 +636,43 @@ impl TimeTrackerApp {
                 })
                 .collect();
         let project_segments: BTreeMap<NaiveDate, Vec<Segment>> = project_contributions
+            .iter()
+            .map(|(&date, contributions)| {
+                (
+                    date,
+                    contributions
+                        .iter()
+                        .map(|contribution| Segment {
+                            color: contribution.color,
+                            weight: contribution.weight,
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let activity_contributions: BTreeMap<NaiveDate, Vec<CalendarContribution>> =
+            activity_totals_by_local_day(&self.store, current_time)
+                .into_iter()
+                .map(|(date, totals)| {
+                    let contributions = totals
+                        .into_iter()
+                        .filter(|(_, seconds)| *seconds > 0)
+                        .filter_map(|(index, seconds)| {
+                            self.store
+                                .activities
+                                .get(index)
+                                .map(|activity| CalendarContribution {
+                                    label: activity.name.clone(),
+                                    detail: format_duration(seconds),
+                                    color: color(activity.color),
+                                    weight: seconds as f32,
+                                })
+                        })
+                        .collect();
+                    (date, contributions)
+                })
+                .collect();
+        let activity_segments: BTreeMap<NaiveDate, Vec<Segment>> = activity_contributions
             .iter()
             .map(|(&date, contributions)| {
                 (
@@ -674,6 +716,12 @@ impl TimeTrackerApp {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.selectable_value(
                                     &mut self.calendar_mode,
+                                    CalendarMode::Activities,
+                                    "Activities",
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                ui.selectable_value(
+                                    &mut self.calendar_mode,
                                     CalendarMode::Projects,
                                     "Projects",
                                 )
@@ -704,6 +752,10 @@ impl TimeTrackerApp {
                                     .get(&date)
                                     .map(|segments| CellFill::Segmented(segments))
                                     .unwrap_or(CellFill::Empty),
+                                CalendarMode::Activities => activity_segments
+                                    .get(&date)
+                                    .map(|segments| CellFill::Segmented(segments))
+                                    .unwrap_or(CellFill::Empty),
                             },
                             |ui, date| {
                                 ui.set_min_width(220.0);
@@ -715,8 +767,15 @@ impl TimeTrackerApp {
                                         .map(format_duration)
                                         .unwrap_or_else(|| "No time tracked".to_owned()),
                                 );
-                                if calendar_mode == CalendarMode::Projects {
-                                    if let Some(contributions) = project_contributions.get(&date) {
+                                if calendar_mode != CalendarMode::Time {
+                                    let contributions = match calendar_mode {
+                                        CalendarMode::Projects => project_contributions.get(&date),
+                                        CalendarMode::Activities => {
+                                            activity_contributions.get(&date)
+                                        }
+                                        CalendarMode::Time => None,
+                                    };
+                                    if let Some(contributions) = contributions {
                                         ui.separator();
                                         for contribution in contributions {
                                             ui.horizontal(|ui| {
@@ -1117,6 +1176,8 @@ impl TimeTrackerApp {
                         egui::TextEdit::singleline(&mut self.new_activity_name)
                             .desired_width(260.0),
                     );
+                    ui.color_edit_button_srgb(&mut self.new_activity_color)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                     add_clicked = ui
                         .button("Add")
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1130,6 +1191,11 @@ impl TimeTrackerApp {
             } else {
                 self.store.activities.push(Activity {
                     name: name.to_owned(),
+                    color: RgbColor {
+                        red: self.new_activity_color[0],
+                        green: self.new_activity_color[1],
+                        blue: self.new_activity_color[2],
+                    },
                 });
                 self.draft_activity = ActivityId(self.store.activities.len() - 1);
                 self.new_activity_name.clear();
@@ -1166,12 +1232,32 @@ impl TimeTrackerApp {
                         .inner_margin(14.0)
                         .show(ui, |ui| {
                             ui.set_min_width((row_width - 30.0).max(0.0));
-                            changed |= ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut activity.name)
-                                        .desired_width(300.0),
-                                )
-                                .changed();
+                            ui.horizontal(|ui| {
+                                let mut rgb = [
+                                    activity.color.red,
+                                    activity.color.green,
+                                    activity.color.blue,
+                                ];
+                                if ui
+                                    .color_edit_button_srgb(&mut rgb)
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .changed()
+                                {
+                                    activity.color = RgbColor {
+                                        red: rgb[0],
+                                        green: rgb[1],
+                                        blue: rgb[2],
+                                    };
+                                    changed = true;
+                                }
+                                changed |= ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut activity.name)
+                                            .desired_width(300.0)
+                                            .text_color(color(activity.color)),
+                                    )
+                                    .changed();
+                            });
                             ui.horizontal_wrapped(|ui| {
                                 stat_label(ui, "Total", format_stat_duration(stats.total_seconds));
                                 stat_label(ui, "Entries", stats.entries.to_string());
@@ -1552,6 +1638,7 @@ fn activity_options(store: &Store, now: i64) -> Vec<ActivityOption> {
         .map(|(index, activity)| ActivityOption {
             id: ActivityId(index),
             name: activity.name.clone(),
+            color: color(activity.color),
             total_seconds: totals[index],
         })
         .collect();
@@ -1588,19 +1675,17 @@ fn activity_combo(
     let selected = activities
         .iter()
         .find(|activity| activity.id == *value)
-        .map(|activity| activity.name.as_str())
-        .unwrap_or("Choose activity");
-    invisible_combo(
-        ui,
-        id,
-        RichText::new(selected).color(Color32::from_gray(30)),
-        220.0,
-        |ui| {
-            for activity in activities {
-                ui.selectable_value(value, activity.id, &activity.name);
-            }
-        },
-    );
+        .map(|activity| RichText::new(&activity.name).color(activity.color))
+        .unwrap_or_else(|| RichText::new("Choose activity").color(Color32::from_gray(30)));
+    invisible_combo(ui, id, selected, 220.0, |ui| {
+        for activity in activities {
+            ui.selectable_value(
+                value,
+                activity.id,
+                RichText::new(&activity.name).color(activity.color),
+            );
+        }
+    });
     *value != before
 }
 
@@ -1931,6 +2016,11 @@ mod tests {
             }],
             activities: vec![Activity {
                 name: "Activity".to_owned(),
+                color: RgbColor {
+                    red: 79,
+                    green: 121,
+                    blue: 203,
+                },
             }],
             time_entries: vec![model::TimeEntry {
                 id: EntryId(1),
@@ -2019,9 +2109,19 @@ mod tests {
             activities: vec![
                 Activity {
                     name: "First".to_owned(),
+                    color: RgbColor {
+                        red: 79,
+                        green: 121,
+                        blue: 203,
+                    },
                 },
                 Activity {
                     name: "Latest".to_owned(),
+                    color: RgbColor {
+                        red: 79,
+                        green: 121,
+                        blue: 203,
+                    },
                 },
             ],
             ..Store::default()

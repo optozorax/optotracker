@@ -30,8 +30,10 @@ its start is interpreted as the following day. Timers and edited entries are
 limited to 24 hours; a forgotten running timer stops at that limit. Day and
 week totals split overnight entries at the computer's local midnight. The
 full-width
-Projects and Activities views support renaming and show usage statistics;
-projects also support color and status editing. Every valid change is saved
+Projects and Activities views support renaming, color editing, and usage statistics;
+projects also support status editing. The Activity calendar can show time intensity,
+project colors, or activity colors; colored cells show each day's time proportions.
+Every valid change is saved
 immediately, and a failed save reverts the in-memory change.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries, persistence rules,

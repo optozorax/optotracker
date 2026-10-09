@@ -116,6 +116,23 @@ pub fn project_totals_by_local_day(
     totals
 }
 
+pub fn activity_totals_by_local_day(
+    store: &Store,
+    now: i64,
+) -> BTreeMap<NaiveDate, BTreeMap<usize, u64>> {
+    let mut totals = BTreeMap::new();
+    for (activity, _, start, stop) in usage_intervals(store, now) {
+        for (date, seconds) in local_time::split_interval_by_day(start, stop) {
+            *totals
+                .entry(date)
+                .or_insert_with(BTreeMap::new)
+                .entry(activity.0)
+                .or_default() += seconds;
+        }
+    }
+    totals
+}
+
 pub fn add_interval_to_days(totals: &mut BTreeMap<NaiveDate, u64>, start: i64, stop: i64) {
     for (date, seconds) in local_time::split_interval_by_day(start, stop) {
         *totals.entry(date).or_default() += seconds;
@@ -165,5 +182,66 @@ fn add_project_interval_to_days(
 ) {
     for (date, seconds) in local_time::split_interval_by_day(start, stop) {
         *totals.entry(date).or_default().entry(project).or_default() += seconds;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{
+        ActiveTimeEntry, Activity, EntryId, RgbColor, TimeEntry, TimeRange, UnixSeconds,
+    };
+
+    #[test]
+    fn activity_calendar_splits_overnight_entries_and_includes_running_time() {
+        let first = NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
+        let second = first.succ_opt().unwrap();
+        let local = |date: NaiveDate, hour: u32, minute: u32| {
+            local_time::timestamp(date.and_hms_opt(hour, minute, 0).unwrap()).unwrap()
+        };
+        let start = local(first, 23, 30);
+        let stop = local(second, 0, 30);
+        let active_start = local(second, 1, 0);
+        let now = local(second, 1, 15);
+        let store = Store {
+            activities: vec![
+                Activity {
+                    name: "One".into(),
+                    color: RgbColor {
+                        red: 1,
+                        green: 2,
+                        blue: 3,
+                    },
+                },
+                Activity {
+                    name: "Two".into(),
+                    color: RgbColor {
+                        red: 4,
+                        green: 5,
+                        blue: 6,
+                    },
+                },
+            ],
+            time_entries: vec![TimeEntry {
+                id: EntryId(1),
+                activity: ActivityId(0),
+                project: None,
+                time: TimeRange {
+                    started_at: UnixSeconds(start),
+                    stopped_at: UnixSeconds(stop),
+                },
+            }],
+            active_entry: Some(ActiveTimeEntry {
+                activity: ActivityId(1),
+                project: None,
+                started_at: UnixSeconds(active_start),
+            }),
+            ..Store::default()
+        };
+
+        let totals = activity_totals_by_local_day(&store, now);
+        assert_eq!(totals[&first][&0], 30 * 60);
+        assert_eq!(totals[&second][&0], 30 * 60);
+        assert_eq!(totals[&second][&1], 15 * 60);
     }
 }

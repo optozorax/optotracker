@@ -142,7 +142,9 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Activity, ActivityId, EntryId, TimeEntry, TimeRange, UnixSeconds};
+    use crate::model::{
+        Activity, ActivityId, EntryId, RgbColor, TimeEntry, TimeRange, UnixSeconds,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_directory(name: &str) -> PathBuf {
@@ -205,6 +207,11 @@ mod tests {
         let mut store = Store {
             activities: vec![Activity {
                 name: "Work".to_owned(),
+                color: RgbColor {
+                    red: 79,
+                    green: 121,
+                    blue: 203,
+                },
             }],
             ..Store::default()
         };
@@ -231,6 +238,11 @@ mod tests {
         let valid = Store {
             activities: vec![Activity {
                 name: "Work".to_owned(),
+                color: RgbColor {
+                    red: 79,
+                    green: 121,
+                    blue: 203,
+                },
             }],
             ..Store::default()
         };
