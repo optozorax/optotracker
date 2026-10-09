@@ -150,18 +150,23 @@ the only program that changes the file while it is running.
 The only other file is `temp.ron` in `%APPDATA%\OptoTracker`, which remembers
 the window size and your last selections. It can be deleted at any time.
 
-## Building
+## Installing
 
-OptoTracker runs on Windows and needs Rust 1.95 or newer:
-
-```powershell
-cargo run --release
-```
+OptoTracker runs on Windows. Download `OptoTracker.exe` from the
+[latest release](../../releases/latest) and run it; it is a single file that
+needs nothing else. Windows may warn about it the first time, because the file
+is not code-signed.
 
 To keep it, open **Settings** and press **Install OptoTracker here**. This
 copies the executable to `%APPDATA%\OptoTracker\OptoTracker.exe`, next to the
 data. The same tab creates a desktop shortcut and turns on starting with
 Windows.
+
+To build it yourself you need Rust 1.95 or newer:
+
+```powershell
+cargo run --release
+```
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the modules, the rules for the
 data and what a Linux version would need.

@@ -1,0 +1,99 @@
+# Builds OptoTracker for Windows and publishes it as a GitHub release.
+#
+# To make a release:
+#
+#   1. Set `version` in Cargo.toml and run `cargo build`, which writes the same
+#      version into Cargo.lock. Commit both files.
+#   2. Push a tag with that version:
+#
+#          git tag v0.1.0
+#          git push origin v0.1.0
+#
+# The release appears with `OptoTracker.exe` attached and notes made from the
+# commits since the previous tag.
+#
+# The workflow can also be started by hand from the Actions tab. That run tests
+# and builds in the same way and keeps the executable as an artifact of the
+# run, without publishing anything.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Build for Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Link the C runtime into the executable, so that it also starts on a
+      # computer without the Visual C++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Check that the tag is the version in Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[0].version' | tr -d '\r')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # The application installs itself under this name, so it is released
+      # under it too.
+      - name: Name the executable
+        run: |
+          mkdir dist
+          cp target/release/opto-tracker.exe dist/OptoTracker.exe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OptoTracker-windows
+          path: dist/OptoTracker.exe
+          if-no-files-found: error
+
+  # A separate job, so that only this one may write to the repository: nothing
+  # that runs during the build gets a token that could change a release.
+  publish:
+    name: Publish the release
+    if: github.ref_type == 'tag'
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: OptoTracker-windows
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" OptoTracker.exe \
+            --title "OptoTracker ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --verify-tag
