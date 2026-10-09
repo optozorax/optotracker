@@ -45,13 +45,19 @@ mod platform {
     use std::os::windows::process::CommandExt as _;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use windows::core::{Interface as _, PCWSTR};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::{
-        FOLDERID_Desktop, IShellLinkW, SHGetKnownFolderPath, ShellLink, KF_FLAG_DEFAULT,
+        DefSubclassProc, FOLDERID_Desktop, IShellLinkW, RemoveWindowSubclass, SHGetKnownFolderPath,
+        SetWindowSubclass, ShellLink, KF_FLAG_DEFAULT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DefWindowProcW, PostMessageW, WM_NCDESTROY, WM_SETTINGCHANGE,
     };
 
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -152,6 +158,61 @@ mod platform {
     fn wide_path(path: &Path) -> Vec<u16> {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
     }
+
+    static KEEPS_WINDOW_THEME: AtomicBool = AtomicBool::new(false);
+    const SETTINGS_FILTER_ID: usize = 1;
+
+    /// Says whether the title bar has a theme of its own (`keep`) or follows
+    /// the theme of Windows.
+    ///
+    /// Whenever Windows announces that some setting has changed, winit puts
+    /// the title bar back into the theme of Windows, even after it was asked
+    /// for a particular one. Those announcements are therefore kept away from
+    /// winit for as long as the title bar keeps its own theme. Afterwards
+    /// winit is sent one, so that it catches up with what it has missed.
+    pub fn keep_window_theme(frame: &eframe::Frame, keep: bool) {
+        use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+
+        let Ok(window_handle) = frame.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+        let kept = KEEPS_WINDOW_THEME.swap(keep, Ordering::Relaxed);
+
+        // SAFETY: the HWND is owned by eframe for the duration of this call,
+        // which is made on the thread of the window. Installing the same
+        // filter again changes nothing.
+        unsafe {
+            let _ = SetWindowSubclass(hwnd, Some(settings_filter), SETTINGS_FILTER_ID, 0);
+            if kept && !keep {
+                let _ = PostMessageW(Some(hwnd), WM_SETTINGCHANGE, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
+    unsafe extern "system" fn settings_filter(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        // SAFETY: the arguments are those of the message being handled.
+        unsafe {
+            if message == WM_SETTINGCHANGE && KEEPS_WINDOW_THEME.load(Ordering::Relaxed) {
+                // The theme is all that winit takes from this message.
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+            }
+            if message == WM_NCDESTROY {
+                let _ = RemoveWindowSubclass(hwnd, Some(settings_filter), SETTINGS_FILTER_ID);
+            }
+            DefSubclassProc(hwnd, message, wparam, lparam)
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -173,6 +234,8 @@ mod platform {
     pub fn create_desktop_shortcut(_paths: &AppPaths) -> Result<(), String> {
         Err("Desktop shortcuts are currently supported only on Windows".to_owned())
     }
+
+    pub fn keep_window_theme(_frame: &eframe::Frame, _keep: bool) {}
 }
 
-pub use platform::{autorun_enabled, create_desktop_shortcut, set_autorun};
+pub use platform::{autorun_enabled, create_desktop_shortcut, keep_window_theme, set_autorun};

@@ -84,6 +84,16 @@ weekday, the hours of the day you work at, the typical session and your streaks.
        alt="The Statistics tab for one year: totals, time per week by activity, lists of activities and projects, and habits">
 </p>
 
+### Light and dark
+
+OptoTracker follows the app mode of Windows, light or dark. To keep one theme
+whatever Windows is set to, choose it in Settings.
+
+<p align="center">
+  <img src="screenshots/time-entries-dark.png" width="760"
+       alt="The Time entries tab in the dark theme">
+</p>
+
 ### Windows integration
 
 - Closing or minimizing the window sends OptoTracker to the tray. This can be
@@ -148,7 +158,8 @@ The file is used where it is and nothing is copied. OptoTracker expects to be
 the only program that changes the file while it is running.
 
 The only other file is `temp.ron` in `%APPDATA%\OptoTracker`, which remembers
-the window size and your last selections. It can be deleted at any time.
+the window size, your settings and your last selections. It can be deleted at
+any time.
 
 ## Installing
 

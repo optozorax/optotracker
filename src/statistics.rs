@@ -19,10 +19,11 @@ use crate::reports::{
     month_end, month_start, project_mixes, range_totals, session_lengths, totals_by_local_day,
     week_start, weekday_totals, worked_days, Bucket, BucketSize, DayTotals, ProjectMix,
 };
+use crate::theme::{data_color, palette};
 use crate::{
     card, color, format_hours_minutes, format_share, frameless_until_hovered, paint_share_bar,
-    right_aligned, row, section_title, semibold_font, swatch_legend, Swatch, BORDER, CAPTION,
-    HAIRLINE, HOVER, NO_PROJECT_COLOR, ROW_HEIGHT, SHARE_BAR_SIZE, SHARE_WIDTH, TEXT,
+    right_aligned, row, section_title, semibold_font, swatch_legend, Swatch, NO_PROJECT_COLOR,
+    ROW_HEIGHT, SHARE_BAR_SIZE, SHARE_WIDTH,
 };
 
 const MEMORY_ID: &str = "opto_tracker_statistics_v1";
@@ -717,6 +718,7 @@ fn tiles(ui: &mut egui::Ui, tiles: &[Tile]) {
         )
     });
     let height = 2.0 * caption_height + value_height + 2.0;
+    let palette = palette(ui);
     for (index, tiles) in tiles.chunks(per_row).enumerate() {
         if index > 0 {
             ui.add_space(8.0);
@@ -737,10 +739,10 @@ fn tiles(ui: &mut egui::Ui, tiles: &[Tile]) {
                         rect.width(),
                     );
                 };
-                line(0.0, tile.caption, &caption_font, CAPTION);
-                line(caption_height + 1.0, &tile.value, &value_font, TEXT);
+                line(0.0, tile.caption, &caption_font, palette.caption);
+                line(caption_height + 1.0, &tile.value, &value_font, palette.text);
                 let note_top = caption_height + value_height + 2.0;
-                line(note_top, &tile.note, &caption_font, CAPTION);
+                line(note_top, &tile.note, &caption_font, palette.caption);
                 if !tile.hint.is_empty() {
                     response.on_hover_text(&tile.hint);
                 }
@@ -837,6 +839,7 @@ fn bar_chart(
     tooltip: impl Fn(&mut egui::Ui, usize),
 ) -> Option<usize> {
     let font = FontId::proportional(11.0);
+    let palette = palette(ui);
     let size = egui::vec2(ui.available_width(), height + AXIS_HEIGHT);
     let (outer, _) = ui.allocate_exact_size(size, Sense::hover());
     let plot = Rect::from_min_max(
@@ -851,7 +854,11 @@ fn bar_chart(
     for line in 0..=lines {
         let y = plot.bottom() - plot.height() * line as f32 / lines as f32;
         // The line that the bars stand on is the only one that stands out.
-        let line_color = if line == 0 { BORDER } else { HAIRLINE };
+        let line_color = if line == 0 {
+            palette.border
+        } else {
+            palette.hairline
+        };
         ui.painter()
             .hline(plot.x_range(), y, Stroke::new(1.0, line_color));
         ui.painter().text(
@@ -859,7 +866,7 @@ fn bar_chart(
             Align2::RIGHT_CENTER,
             axis_text(line * step),
             font.clone(),
-            CAPTION,
+            palette.caption,
         );
     }
     if bars.is_empty() {
@@ -886,7 +893,7 @@ fn bar_chart(
         let response = ui.interact(slot_rect, id.with(index), sense);
         if response.hovered() {
             ui.painter()
-                .rect_filled(slot_rect.shrink2(egui::vec2(0.0, 0.5)), 2.0, HOVER);
+                .rect_filled(slot_rect.shrink2(egui::vec2(0.0, 0.5)), 2.0, palette.hover);
         }
 
         let x_range = Rangef::new(
@@ -914,11 +921,12 @@ fn bar_chart(
                 sw: 0,
                 se: 0,
             };
+            let segment_color = data_color(ui.visuals(), segment_color);
             ui.painter().rect_filled(segment, corners, segment_color);
-            // A white line keeps neighboring colors apart.
+            // A line in the color of the card keeps neighboring colors apart.
             if position > 0 && segment.height() >= 3.0 {
                 ui.painter()
-                    .hline(x_range, segment.bottom(), Stroke::new(1.0, Color32::WHITE));
+                    .hline(x_range, segment.bottom(), Stroke::new(1.0, palette.card));
             }
             bottom = top;
         }
@@ -941,7 +949,11 @@ fn bar_chart(
             let Some(label) = bar.label.as_ref().filter(|label| label.strong == strong) else {
                 continue;
             };
-            let label_color = if strong { TEXT } else { CAPTION };
+            let label_color = if strong {
+                palette.text
+            } else {
+                palette.caption
+            };
             let galley = ui
                 .painter()
                 .layout_no_wrap(label.text.clone(), font.clone(), label_color);
@@ -982,7 +994,7 @@ fn parts_tooltip(ui: &mut egui::Ui, heading: &str, seconds: u64, parts: &[Part<'
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let size = egui::Vec2::splat(Swatch::SIZE);
                     let (swatch, _) = ui.allocate_exact_size(size, Sense::hover());
-                    part.swatch.paint(ui.painter(), swatch);
+                    part.swatch.paint(ui, swatch);
                     ui.add(egui::Label::new(part.name).truncate());
                 });
             });
@@ -1026,6 +1038,7 @@ fn part_row(ui: &mut egui::Ui, part: &Part<'_>, whole: u64, largest: u64) {
     let size = egui::vec2(ui.available_width(), LIST_ROW_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     let font = FontId::proportional(14.0);
+    let palette = palette(ui);
     let middle = rect.center().y;
     let share = format_share(part.seconds, whole);
     let share_at = egui::pos2(rect.right(), middle);
@@ -1036,7 +1049,7 @@ fn part_row(ui: &mut egui::Ui, part: &Part<'_>, whole: u64, largest: u64) {
         Align2::RIGHT_CENTER,
         &share,
         &font,
-        CAPTION,
+        palette.caption,
         no_limit,
     );
     let time = format_hours_minutes(part.seconds);
@@ -1047,7 +1060,7 @@ fn part_row(ui: &mut egui::Ui, part: &Part<'_>, whole: u64, largest: u64) {
         Align2::RIGHT_CENTER,
         &time,
         &font,
-        TEXT,
+        palette.text,
         no_limit,
     );
     let mut name_right = time_at.x - TIME_WIDTH - 8.0;
@@ -1056,14 +1069,14 @@ fn part_row(ui: &mut egui::Ui, part: &Part<'_>, whole: u64, largest: u64) {
         let bar_center = egui::pos2(name_right - SHARE_BAR_SIZE.x * 0.5, middle);
         let track = Rect::from_center_size(bar_center, SHARE_BAR_SIZE);
         let share = part.seconds as f32 / largest.max(1) as f32;
-        paint_share_bar(ui.painter(), track, share, part.swatch.color());
+        paint_share_bar(ui, track, share, part.swatch.color());
         name_right = track.left() - 10.0;
     }
     let swatch = Rect::from_center_size(
         egui::pos2(rect.left() + Swatch::SIZE * 0.5, middle),
         egui::Vec2::splat(Swatch::SIZE),
     );
-    part.swatch.paint(ui.painter(), swatch);
+    part.swatch.paint(ui, swatch);
     let name_at = egui::pos2(swatch.right() + 6.0, middle);
     let room = name_right - name_at.x;
     if paint_line(
@@ -1072,7 +1085,7 @@ fn part_row(ui: &mut egui::Ui, part: &Part<'_>, whole: u64, largest: u64) {
         Align2::LEFT_CENTER,
         part.name,
         &font,
-        TEXT,
+        palette.text,
         room,
     ) {
         response.on_hover_text(part.name);
@@ -1091,7 +1104,7 @@ fn habits(ui: &mut egui::Ui, data: &Data<'_>, range: &RangeInclusive<NaiveDate>)
         ui.label(
             RichText::new(text)
                 .font(FontId::proportional(11.0))
-                .color(CAPTION),
+                .color(palette(ui).caption),
         );
     };
     let bar = |seconds: u64, label: Option<String>| Bar {
@@ -1250,14 +1263,15 @@ pub fn project_comparison(ui: &mut egui::Ui, store: &Store, now: i64) {
             ui.label(RichText::new("by activity").weak());
         });
         ui.spacing_mut().item_spacing.y = 0.0;
-        mix_row(ui, store, &ranks, None, "All projects", TEXT, &all);
+        let text = palette(ui).text;
+        mix_row(ui, store, &ranks, None, "All projects", text, &all);
         for (index, mix) in mixes.iter().enumerate().rev() {
             if mix.seconds == 0 {
                 continue;
             }
             let project = &store.projects[index];
             let name_color = match project.status {
-                ProjectStatus::Active => TEXT,
+                ProjectStatus::Active => text,
                 ProjectStatus::Finished => ui.visuals().weak_text_color(),
             };
             let swatch = Swatch::Project(color(project.color));
@@ -1297,6 +1311,7 @@ fn mix_row(
     let middle = line.center().y;
     let name_font = semibold_font(14.0);
     let small = FontId::proportional(11.0);
+    let palette = palette(ui);
     let no_limit = f32::INFINITY;
     let time = format_hours_minutes(mix.seconds);
     let time_at = egui::pos2(line.right(), middle);
@@ -1306,7 +1321,7 @@ fn mix_row(
         Align2::RIGHT_CENTER,
         &time,
         &name_font,
-        TEXT,
+        palette.text,
         no_limit,
     );
     let mut name_right = line.right() - MIX_TIME_WIDTH;
@@ -1331,7 +1346,7 @@ fn mix_row(
             Align2::RIGHT_CENTER,
             &span,
             &small,
-            CAPTION,
+            palette.caption,
             room,
         );
         name_right -= room.min(span.chars().count() as f32 * 6.0) + 8.0;
@@ -1342,7 +1357,7 @@ fn mix_row(
             egui::pos2(line.left() + Swatch::SIZE * 0.5, middle),
             egui::Vec2::splat(Swatch::SIZE),
         );
-        swatch.paint(ui.painter(), rect);
+        swatch.paint(ui, rect);
         name_left = rect.right() + 6.0;
     }
     let name_at = egui::pos2(name_left, middle);
@@ -1379,11 +1394,11 @@ fn mix_row(
             ne: if position == last { 3 } else { 0 },
             se: if position == last { 3 } else { 0 },
         };
-        ui.painter()
-            .rect_filled(segment, corners, part.swatch.color());
+        let segment_color = data_color(ui.visuals(), part.swatch.color());
+        ui.painter().rect_filled(segment, corners, segment_color);
         if position > 0 && segment.width() >= 3.0 {
             ui.painter()
-                .vline(left, bar.y_range(), Stroke::new(1.0, Color32::WHITE));
+                .vline(left, bar.y_range(), Stroke::new(1.0, palette.card));
         }
         if pointer.is_some_and(|pointer| segment.contains(pointer)) {
             hovered = Some((segment, position));
@@ -1402,7 +1417,7 @@ fn mix_row(
             ui.horizontal(|ui| {
                 let (swatch, _) =
                     ui.allocate_exact_size(egui::Vec2::splat(Swatch::SIZE), Sense::hover());
-                part.swatch.paint(ui.painter(), swatch);
+                part.swatch.paint(ui, swatch);
                 ui.label(part.name);
             });
             ui.label(format!(

@@ -145,6 +145,7 @@ impl CalendarHeatmap {
         let year_stroke = Stroke::new(1.5, noninteractive.fg_stroke.color);
         let hover_stroke = Stroke::new(1.5, ui.visuals().strong_text_color());
         let selection_color = ui.visuals().selection.stroke.color;
+        let dark_mode = ui.visuals().dark_mode;
         let pointer_position = ui.ctx().pointer_hover_pos();
         let mut hovered_date = None;
 
@@ -154,12 +155,11 @@ impl CalendarHeatmap {
                 let min = origin + egui::vec2(week as f32 * step, weekday as f32 * step);
                 let cell = Rect::from_min_size(min, Vec2::splat(square));
                 if date > today {
-                    ui.painter().rect_filled(cell, 2.0, Color32::from_gray(246));
+                    ui.painter().rect_filled(cell, 2.0, future_color(dark_mode));
                 } else {
                     match fill(date) {
                         CellFill::Empty => {
-                            ui.painter()
-                                .rect_filled(cell, 2.0, Color32::from_rgb(235, 237, 240));
+                            ui.painter().rect_filled(cell, 2.0, empty_color(dark_mode));
                         }
                         CellFill::Solid(color) => {
                             ui.painter().rect_filled(cell, 2.0, color);
@@ -301,7 +301,11 @@ impl CalendarHeatmap {
         step: f32,
     ) {
         let font = FontId::proportional(if step < 7.5 { 10.0 } else { 12.0 });
-        let color = Color32::from_rgb(87, 96, 106);
+        let color = if ui.visuals().dark_mode {
+            Color32::from_rgb(139, 148, 158)
+        } else {
+            Color32::from_rgb(87, 96, 106)
+        };
 
         for (weekday, label) in [(0, "Mon"), (6, "Sun")] {
             ui.painter().text(
@@ -355,7 +359,7 @@ fn paint_segments(ui: &egui::Ui, cell: Rect, segments: &[Segment]) {
     let total: f32 = segments.iter().map(|segment| segment.weight.max(0.0)).sum();
     if total <= 0.0 {
         ui.painter()
-            .rect_filled(cell, 2.0, Color32::from_rgb(235, 237, 240));
+            .rect_filled(cell, 2.0, empty_color(ui.visuals().dark_mode));
         return;
     }
 
@@ -383,22 +387,59 @@ fn paint_segments(ui: &egui::Ui, cell: Rect, segments: &[Segment]) {
     }
 }
 
-pub fn heat_color(value: f32) -> Color32 {
-    if value > 1.0 {
-        return Color32::from_rgb(14, 68, 41);
-    }
-    let value = value.clamp(0.0, 1.0);
-    if value <= 0.0 {
-        Color32::from_rgb(235, 237, 240)
-    } else if value < 0.25 {
-        Color32::from_rgb(155, 233, 168)
-    } else if value < 0.5 {
-        Color32::from_rgb(64, 196, 99)
-    } else if value < 0.75 {
-        Color32::from_rgb(48, 161, 78)
+/// A day that has not come yet.
+fn future_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(28, 32, 38)
     } else {
-        Color32::from_rgb(33, 110, 57)
+        Color32::from_gray(246)
     }
+}
+
+/// A day without anything to show.
+fn empty_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(38, 44, 52)
+    } else {
+        Color32::from_rgb(235, 237, 240)
+    }
+}
+
+/// The green for a value between nothing (0) and a full cell (1), with one
+/// more shade for everything beyond that. More is darker on a light
+/// background and brighter on a dark one.
+pub fn heat_color(value: f32, dark_mode: bool) -> Color32 {
+    let shades: [[u8; 3]; 5] = if dark_mode {
+        [
+            [14, 68, 41],
+            [0, 109, 50],
+            [38, 166, 65],
+            [57, 211, 83],
+            [134, 239, 144],
+        ]
+    } else {
+        [
+            [155, 233, 168],
+            [64, 196, 99],
+            [48, 161, 78],
+            [33, 110, 57],
+            [14, 68, 41],
+        ]
+    };
+    let [red, green, blue] = if value > 1.0 {
+        shades[4]
+    } else if value <= 0.0 {
+        return empty_color(dark_mode);
+    } else if value < 0.25 {
+        shades[0]
+    } else if value < 0.5 {
+        shades[1]
+    } else if value < 0.75 {
+        shades[2]
+    } else {
+        shades[3]
+    };
+    Color32::from_rgb(red, green, blue)
 }
 
 fn month_name(month: u32) -> &'static str {

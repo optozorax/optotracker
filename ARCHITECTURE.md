@@ -26,6 +26,11 @@ rules to maintain.
   transient popup state and edits a caller-owned local date.
 - `pagination.rs` is reusable offset-based pagination. Its starting position
   may be any item rather than only a page-size boundary.
+- `theme.rs` holds the colors of the interface as one palette for the light
+  theme and one for the dark theme. egui decides which theme is shown, from
+  the setting or from the system; code that paints with its own colors asks
+  for the palette of the visuals it is drawn with. The reusable widgets do
+  not use it and choose between their own light and dark colors.
 - `paths.rs` resolves application paths once. `desktop.rs`, `tray.rs`,
   `single_instance.rs`, and the taskbar functions in `app_icon.rs` are the only
   places that contain desktop or operating-system integration.

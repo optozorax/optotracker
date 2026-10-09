@@ -58,10 +58,18 @@ impl Widget for DatePickerButton<'_> {
             state.draft = *self.selection;
         }
 
+        let [pressed_fill, hovered_fill] = if ui.visuals().dark_mode {
+            [Color32::from_rgb(58, 72, 86), Color32::from_rgb(44, 55, 66)]
+        } else {
+            [
+                Color32::from_rgb(205, 222, 232),
+                Color32::from_rgb(226, 238, 244),
+            ]
+        };
         let fill = if response.is_pointer_button_down_on() {
-            Color32::from_rgb(205, 222, 232)
+            pressed_fill
         } else if response.hovered() || state.open {
-            Color32::from_rgb(226, 238, 244)
+            hovered_fill
         } else {
             Color32::TRANSPARENT
         };
@@ -144,6 +152,21 @@ impl DatePickerPopup<'_> {
     fn draw(&mut self, ui: &mut Ui) -> PopupAction {
         let mut action = PopupAction::None;
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        // The weekday names, the days of the neighboring months and the
+        // weekends.
+        let [weekday_color, outside_color, weekend_color] = if ui.visuals().dark_mode {
+            [
+                Color32::from_gray(150),
+                Color32::from_gray(98),
+                Color32::from_rgb(232, 124, 124),
+            ]
+        } else {
+            [
+                Color32::from_gray(100),
+                Color32::from_gray(165),
+                Color32::from_rgb(174, 72, 72),
+            ]
+        };
 
         ui.horizontal(|ui| {
             let previous_year = shift_year(*self.draft, -1);
@@ -201,11 +224,7 @@ impl DatePickerPopup<'_> {
                         egui::vec2(36.0, 20.0),
                         Layout::centered_and_justified(egui::Direction::TopDown),
                         |ui| {
-                            ui.label(
-                                RichText::new(weekday)
-                                    .small()
-                                    .color(Color32::from_gray(100)),
-                            );
+                            ui.label(RichText::new(weekday).small().color(weekday_color));
                         },
                     );
                 }
@@ -220,9 +239,9 @@ impl DatePickerPopup<'_> {
                     let selected = date == *self.draft;
                     let weekend = date.weekday().number_from_monday() >= 6;
                     let text_color = if !current_month {
-                        Color32::from_gray(165)
+                        outside_color
                     } else if weekend {
-                        Color32::from_rgb(174, 72, 72)
+                        weekend_color
                     } else {
                         ui.visuals().text_color()
                     };

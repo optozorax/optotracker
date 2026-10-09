@@ -23,6 +23,7 @@ mod reports;
 mod single_instance;
 mod statistics;
 mod storage;
+mod theme;
 mod tray;
 
 use date_picker::DatePickerButton;
@@ -44,23 +45,8 @@ use reports::{
 };
 use statistics::StatisticsView;
 use storage::JsonStore;
+use theme::{data_color, palette, Palette};
 
-// The button colors are dark enough for their white labels to stay readable.
-const BLUE: Color32 = Color32::from_rgb(0, 118, 200);
-const RED: Color32 = Color32::from_rgb(211, 47, 47);
-const GREEN: Color32 = Color32::from_rgb(56, 142, 60);
-const TEXT: Color32 = Color32::from_rgb(34, 40, 47);
-// The page is nearly white, so cards are told apart by their borders and
-// their tinted headers.
-const PAGE: Color32 = Color32::from_rgb(249, 250, 252);
-const HEADER: Color32 = Color32::from_rgb(235, 241, 246);
-const BORDER: Color32 = Color32::from_rgb(203, 212, 220);
-const HAIRLINE: Color32 = Color32::from_rgb(226, 232, 237);
-const OUTLINE: Color32 = Color32::from_rgb(196, 205, 213);
-const HOVER: Color32 = Color32::from_rgb(238, 243, 247);
-const PRESSED: Color32 = Color32::from_rgb(224, 231, 237);
-const SELECTION: Color32 = Color32::from_rgb(214, 232, 248);
-const SELECTION_TEXT: Color32 = Color32::from_rgb(0, 84, 150);
 const ROW_HEIGHT: f32 = 26.0;
 const TIMER_HEIGHT: f32 = 34.0;
 const TIMER_BUTTON_WIDTH: f32 = 84.0;
@@ -76,13 +62,9 @@ const MIN_SELECTOR_WIDTH: f32 = 110.0;
 const MAX_SELECTOR_WIDTH: f32 = 300.0;
 const CALENDAR_PAGE_WEEKS: i32 = 13;
 const LEGEND_ITEMS: usize = 6;
-// A day with this much tracked time gets the darkest regular heat color.
+// A day with this much tracked time gets the strongest regular heat color.
 const FULL_DAY_SECONDS: f32 = 8.0 * 60.0 * 60.0;
 const NO_PROJECT_COLOR: Color32 = Color32::from_gray(125);
-/// The small print of charts and legends.
-const CAPTION: Color32 = Color32::from_rgb(87, 96, 106);
-const STRIPE: Color32 = Color32::from_rgb(246, 249, 251);
-const ROW_HOVER: Color32 = Color32::from_rgb(244, 248, 251);
 const ENTRIES_PER_PAGE: usize = 100;
 const UI_SELECTIONS_MEMORY_ID: &str = "opto_tracker_ui_selections_v1";
 
@@ -144,7 +126,6 @@ fn main() -> eframe::Result {
         "OptoTracker",
         options,
         Box::new(move |cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::light());
             configure_style(&cc.egui_ctx);
             configure_fonts(&cc.egui_ctx);
             Ok(Box::new(TimeTrackerApp::load(
@@ -172,35 +153,12 @@ fn configure_style(ctx: &egui::Context) {
         }
         style.spacing.button_padding = egui::vec2(7.0, 2.0);
         style.spacing.interact_size.y = 24.0;
-
-        let visuals = &mut style.visuals;
-        visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
-        visuals.selection.bg_fill = SELECTION;
-        visuals.selection.stroke.color = SELECTION_TEXT;
-
-        // Buttons and fields are white with an outline. egui's own idle look
-        // is a gray fill for buttons and no outline at all for text fields
-        // and checkboxes, which makes those disappear on the white cards.
-        let widgets = &mut visuals.widgets;
-        widgets.noninteractive.fg_stroke.color = TEXT;
-        widgets.inactive.fg_stroke.color = TEXT;
-        widgets.inactive.weak_bg_fill = Color32::WHITE;
-        widgets.inactive.bg_stroke = Stroke::new(1.0, OUTLINE);
-        widgets.hovered.weak_bg_fill = HOVER;
-        widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(150));
-        widgets.active.weak_bg_fill = PRESSED;
-        widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_gray(110));
-        widgets.open.weak_bg_fill = HOVER;
-        for state in [
-            &mut widgets.noninteractive,
-            &mut widgets.inactive,
-            &mut widgets.hovered,
-            &mut widgets.active,
-            &mut widgets.open,
-        ] {
-            state.corner_radius = egui::CornerRadius::same(4);
-        }
     });
+    for mode in [egui::Theme::Light, egui::Theme::Dark] {
+        ctx.set_visuals_of(mode, theme::visuals(mode));
+    }
+    // For a system that does not say which theme it uses. Windows always does.
+    ctx.options_mut(|options| options.fallback_theme = egui::Theme::Light);
 }
 
 fn configure_fonts(ctx: &egui::Context) {
@@ -362,6 +320,7 @@ impl RememberedSelections {
 struct PersistedSettings {
     close_or_minimize_to_tray: bool,
     start_minimized_on_autorun: bool,
+    theme: egui::ThemePreference,
 }
 
 impl Default for PersistedSettings {
@@ -369,6 +328,7 @@ impl Default for PersistedSettings {
         Self {
             close_or_minimize_to_tray: true,
             start_minimized_on_autorun: true,
+            theme: egui::ThemePreference::System,
         }
     }
 }
@@ -433,6 +393,8 @@ struct TimeTrackerApp {
     entry_pagination: Pagination,
     statistics: StatisticsView,
     last_icon_running: Option<bool>,
+    /// Whether the title bar was last told to keep a theme of its own.
+    window_keeps_theme: Option<bool>,
     tray: Option<tray::TrayController>,
     exit_requested: bool,
     window_hidden: bool,
@@ -464,6 +426,7 @@ impl TimeTrackerApp {
         let preferences: PersistedSettings = storage
             .and_then(|storage| eframe::get_value(storage, "opto_tracker_settings"))
             .unwrap_or_default();
+        ctx.set_theme(preferences.theme);
         let message = match &tray {
             Ok(_) => String::new(),
             Err(error) => format!("Could not create tray icon: {error}"),
@@ -498,6 +461,7 @@ impl TimeTrackerApp {
             entry_pagination: Pagination::new(ENTRIES_PER_PAGE),
             statistics: StatisticsView::load(ctx),
             last_icon_running: None,
+            window_keeps_theme: None,
             tray,
             exit_requested: false,
             window_hidden,
@@ -639,10 +603,13 @@ impl TimeTrackerApp {
                 .min_size(egui::vec2(TIMER_BUTTON_WIDTH, TIMER_HEIGHT - 2.0))
         };
         if started_at.is_some() {
-            if ui.add(button("STOP", RED)).clicked() {
+            if ui.add(button("STOP", palette(ui).stop)).clicked() {
                 self.stop_timer();
             }
-        } else if ui.add_enabled(can_start, button("START", BLUE)).clicked() {
+        } else if ui
+            .add_enabled(can_start, button("START", palette(ui).start))
+            .clicked()
+        {
             self.start_timer();
         }
 
@@ -721,6 +688,7 @@ impl TimeTrackerApp {
         let activities = activity_options(&self.store, current_time);
         let projects = project_options(&self.store);
         let day_totals = totals_by_local_day(&self.store, current_time);
+        let shown_color = |rgb: RgbColor| data_color(ui.visuals(), color(rgb));
         let project_contributions: BTreeMap<NaiveDate, Vec<CalendarContribution>> = day_totals
             .iter()
             .map(|(&date, day)| {
@@ -731,7 +699,7 @@ impl TimeTrackerApp {
                     .map(|(&project, &seconds)| {
                         let (label, segment_color) = project
                             .and_then(|index| self.store.projects.get(index))
-                            .map(|project| (project.name.clone(), color(project.color)))
+                            .map(|project| (project.name.clone(), shown_color(project.color)))
                             .unwrap_or_else(|| ("No project".to_owned(), NO_PROJECT_COLOR));
                         CalendarContribution {
                             label,
@@ -773,7 +741,7 @@ impl TimeTrackerApp {
                             .map(|activity| CalendarContribution {
                                 label: activity.name.clone(),
                                 detail: format_duration(seconds),
-                                color: color(activity.color),
+                                color: shown_color(activity.color),
                                 weight: seconds as f32,
                             })
                     })
@@ -857,6 +825,7 @@ impl TimeTrackerApp {
                         });
                     });
                     let calendar_mode = self.calendar_mode;
+                    let dark_mode = ui.visuals().dark_mode;
                     let change = self.calendar.ui(
                         ui,
                         today,
@@ -867,6 +836,7 @@ impl TimeTrackerApp {
                                 .map(|day| {
                                     CellFill::Solid(heat_color(
                                         day.seconds as f32 / FULL_DAY_SECONDS,
+                                        dark_mode,
                                     ))
                                 })
                                 .unwrap_or(CellFill::Empty),
@@ -1007,11 +977,11 @@ impl TimeTrackerApp {
                     ui.add_space(4.0);
                     let indices = entries_by_day.get(&date).cloned().unwrap_or_default();
                     // One card per day: a header, then the entries divided by hairlines.
-                    card_frame().show(ui, |ui| {
+                    card_frame(ui).show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.spacing_mut().item_spacing.y = 0.0;
                         Frame::new()
-                            .fill(HEADER)
+                            .fill(palette(ui).header)
                             .corner_radius(egui::CornerRadius {
                                 nw: 4,
                                 ne: 4,
@@ -1101,7 +1071,7 @@ impl TimeTrackerApp {
                             if ui.rect_contains_pointer(row_rect) {
                                 ui.painter().set(
                                     highlight,
-                                    egui::Shape::rect_filled(row_rect, 0.0, ROW_HOVER),
+                                    egui::Shape::rect_filled(row_rect, 0.0, palette(ui).row_hover),
                                 );
                             }
                         }
@@ -1402,10 +1372,44 @@ impl TimeTrackerApp {
 
     fn settings_contents(&mut self, ui: &mut egui::Ui) {
         if !self.settings_message.is_empty() {
-            ui.label(RichText::new(&self.settings_message).color(BLUE));
+            ui.label(RichText::new(&self.settings_message).color(palette(ui).notice));
             ui.add_space(6.0);
         }
 
+        card(ui, |ui| {
+            section_title(ui, "Appearance");
+            ui.add_space(4.0);
+            let before = self.preferences.theme;
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Theme:");
+                for (theme, name) in [
+                    (egui::ThemePreference::System, "Same as Windows"),
+                    (egui::ThemePreference::Light, "Light"),
+                    (egui::ThemePreference::Dark, "Dark"),
+                ] {
+                    ui.radio_value(&mut self.preferences.theme, theme, name);
+                }
+            });
+            if self.preferences.theme != before {
+                ui.ctx().set_theme(self.preferences.theme);
+            }
+            if self.preferences.theme == egui::ThemePreference::System {
+                let app_mode = match ui.ctx().system_theme() {
+                    Some(egui::Theme::Dark) => "which is dark now",
+                    Some(egui::Theme::Light) => "which is light now",
+                    None => "which could not be read",
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Follows the app mode in the color settings of Windows, {app_mode}."
+                    ))
+                    .small()
+                    .color(palette(ui).muted),
+                );
+            }
+        });
+
+        ui.add_space(8.0);
         card(ui, |ui| {
             section_title(ui, "Application folder");
             ui.label(RichText::new(self.app_paths.directory.display().to_string()).monospace());
@@ -1413,7 +1417,7 @@ impl TimeTrackerApp {
                 RichText::new(
                     "The installed executable and UI persistence are stored in this folder.",
                 )
-                .color(Color32::from_gray(105)),
+                .color(palette(ui).muted),
             );
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
@@ -1557,7 +1561,7 @@ impl TimeTrackerApp {
                     "When disabled, minimizing behaves normally and closing exits the app.",
                 )
                 .small()
-                .color(Color32::from_gray(105)),
+                .color(palette(ui).muted),
             );
         });
     }
@@ -1639,7 +1643,7 @@ impl eframe::App for TimeTrackerApp {
         egui::Panel::top("top-bar")
             .frame(
                 Frame::new()
-                    .fill(Color32::WHITE)
+                    .fill(palette(ui).card)
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ui, |ui| {
@@ -1662,7 +1666,7 @@ impl eframe::App for TimeTrackerApp {
                         if !self.message.is_empty() {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&self.message).color(Color32::from_gray(110)),
+                                    RichText::new(&self.message).color(palette(ui).muted),
                                 )
                                 .truncate(),
                             )
@@ -1675,13 +1679,13 @@ impl eframe::App for TimeTrackerApp {
             egui::Panel::top("timer")
                 .frame(
                     Frame::new()
-                        .fill(Color32::WHITE)
+                        .fill(palette(ui).card)
                         .inner_margin(egui::Margin::symmetric(12, 8)),
                 )
                 .show(ui, |ui| self.timer_panel(ui));
         }
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(PAGE).inner_margin(12.0))
+            .frame(Frame::new().fill(palette(ui).page).inner_margin(12.0))
             .show(ui, |ui| {
                 ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 match self.view {
@@ -1693,6 +1697,12 @@ impl eframe::App for TimeTrackerApp {
                 }
             });
         self.remember_selections(ui.ctx());
+
+        let keeps_theme = self.preferences.theme != egui::ThemePreference::System;
+        if self.window_keeps_theme != Some(keeps_theme) {
+            desktop::keep_window_theme(frame, keeps_theme);
+            self.window_keeps_theme = Some(keeps_theme);
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1715,8 +1725,7 @@ fn pagination_controls(ui: &mut egui::Ui, pagination: &mut Pagination, total_ent
 
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!("{first}–{last} of {total_entries}"))
-                .color(Color32::from_gray(105)),
+            RichText::new(format!("{first}–{last} of {total_entries}")).color(palette(ui).muted),
         );
         right_aligned(ui, |ui| {
             if ui
@@ -1891,19 +1900,21 @@ impl Swatch {
         egui::Id::new("swatch")
     }
 
-    fn paint(self, painter: &egui::Painter, rect: egui::Rect) {
+    fn paint(self, ui: &egui::Ui, rect: egui::Rect) {
+        let painter = ui.painter();
         match self {
             Self::Activity(color) => {
+                let color = data_color(ui.visuals(), color);
                 painter.circle_filled(rect.center(), rect.width() * 0.5, color);
             }
             Self::Project(color) => {
-                painter.rect_filled(rect, 2.0, color);
+                painter.rect_filled(rect, 2.0, data_color(ui.visuals(), color));
             }
             Self::Empty => {
                 painter.rect_stroke(
                     rect,
                     2.0,
-                    Stroke::new(1.0, Color32::from_gray(175)),
+                    Stroke::new(1.0, palette(ui).empty_swatch),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1924,7 +1935,7 @@ fn swatch_atoms<'a>(text: RichText, grow: bool) -> Atoms<'a> {
 fn swatch_button(ui: &mut egui::Ui, swatch: Swatch, button: Button<'_>) -> egui::Response {
     let response = button.atom_ui(ui);
     if let Some(rect) = response.rect(Swatch::id()) {
-        swatch.paint(ui.painter(), rect);
+        swatch.paint(ui, rect);
     }
     response.response
 }
@@ -1989,7 +2000,8 @@ fn selector(
                         .ctx()
                         .read_response(ui.next_auto_id())
                         .is_some_and(|response| response.hovered());
-                    let tint = color.gamma_multiply(if hovered { 0.3 } else { 0.16 });
+                    let strength = if hovered { 0.3 } else { 0.16 };
+                    let tint = data_color(ui.visuals(), color).gamma_multiply(strength);
                     let button = Button::new(swatch_atoms(text, false))
                         .truncate()
                         .fill(tint)
@@ -2064,16 +2076,17 @@ fn right_aligned<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> 
         .inner
 }
 
-fn card_frame() -> Frame {
+fn card_frame(ui: &egui::Ui) -> Frame {
+    let palette = palette(ui);
     Frame::new()
-        .fill(Color32::WHITE)
-        .stroke(Stroke::new(1.0, BORDER))
+        .fill(palette.card)
+        .stroke(Stroke::new(1.0, palette.border))
         .corner_radius(5)
 }
 
-/// A white panel that spans the available width.
+/// A bordered panel that spans the available width.
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    card_frame()
+    card_frame(ui)
         .inner_margin(10.0)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -2089,8 +2102,11 @@ fn entry_frame() -> Frame {
 fn hairline(ui: &mut egui::Ui) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter()
-        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, HAIRLINE));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0, palette(ui).hairline),
+    );
 }
 
 fn section_title(ui: &mut egui::Ui, text: &str) {
@@ -2181,7 +2197,7 @@ fn quiet_icon_button(
     let size = egui::vec2(22.0, 22.0);
     let response = ui.add_enabled(enabled, Button::new("").frame(false).min_size(size));
     let color = if !enabled {
-        Color32::from_gray(210)
+        palette(ui).icon_disabled
     } else if response.hovered() {
         let strength = if response.is_pointer_button_down_on() {
             0.3
@@ -2192,13 +2208,13 @@ fn quiet_icon_button(
             .rect_filled(response.rect, 3.0, accent.gamma_multiply(strength));
         accent
     } else {
-        Color32::from_gray(140)
+        palette(ui).icon
     };
     (response, color)
 }
 
 fn play_icon_button(ui: &mut egui::Ui, enabled: bool) -> bool {
-    let (response, color) = quiet_icon_button(ui, enabled, GREEN);
+    let (response, color) = quiet_icon_button(ui, enabled, palette(ui).restart);
     let center = response.rect.center();
     ui.painter().add(egui::Shape::convex_polygon(
         vec![
@@ -2216,7 +2232,7 @@ fn play_icon_button(ui: &mut egui::Ui, enabled: bool) -> bool {
 }
 
 fn cross_icon_button(ui: &mut egui::Ui) -> bool {
-    let (response, color) = quiet_icon_button(ui, true, RED);
+    let (response, color) = quiet_icon_button(ui, true, palette(ui).delete);
     let center = response.rect.center();
     let stroke = Stroke::new(1.5, color);
     for slope in [1.0, -1.0] {
@@ -2261,7 +2277,7 @@ fn project_status_combo(
 fn disclosure_button(ui: &mut egui::Ui, id: egui::Id, enabled: bool, parts: &str) -> bool {
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-    let (response, color) = quiet_icon_button(ui, enabled, TEXT);
+    let (response, color) = quiet_icon_button(ui, enabled, palette(ui).text);
     if response.clicked() {
         state.toggle(ui);
         state.store(ui.ctx());
@@ -2331,7 +2347,7 @@ fn overflowing_name(ui: &mut egui::Ui, swatch: Swatch, name: &str, right: f32) {
     let size = egui::vec2(width, ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     swatch.paint(
-        ui.painter(),
+        ui,
         egui::Rect::from_center_size(
             egui::pos2(swatch_left + Swatch::SIZE * 0.5, rect.center().y),
             egui::Vec2::splat(Swatch::SIZE),
@@ -2378,10 +2394,11 @@ fn calendar_legend(
     mode: CalendarMode,
     items: &[(Swatch, String)],
 ) {
+    let caption_color = palette(ui).caption;
     let caption = |text: &str| {
         RichText::new(text.to_owned())
             .font(FontId::proportional(11.0))
-            .color(CAPTION)
+            .color(caption_color)
     };
     let top = ui.cursor().top();
     let area = egui::Rect::from_x_y_ranges(cells_x, top..=top + Swatch::SIZE + 4.0);
@@ -2394,7 +2411,8 @@ fn calendar_legend(
                 let step = |ui: &mut egui::Ui, value: f32, meaning: &str| {
                     let (rect, response) = ui
                         .allocate_exact_size(egui::Vec2::splat(Swatch::SIZE), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 2.0, heat_color(value));
+                    let color = heat_color(value, ui.visuals().dark_mode);
+                    ui.painter().rect_filled(rect, 2.0, color);
                     response.on_hover_text(meaning);
                 };
                 ui.label(caption("more than 8h"));
@@ -2418,6 +2436,7 @@ fn calendar_legend(
 /// are spelled out.
 fn swatch_legend(ui: &mut egui::Ui, items: &[(Swatch, String)]) {
     let font = FontId::proportional(11.0);
+    let caption = palette(ui).caption;
     let text_offset = Swatch::SIZE + 4.0;
     let text_width = (ui.available_width() - text_offset).max(0.0);
     ui.horizontal_wrapped(|ui| {
@@ -2426,7 +2445,7 @@ fn swatch_legend(ui: &mut egui::Ui, items: &[(Swatch, String)]) {
             // Each entry is a single widget, so that a line break never
             // separates a swatch from its name.
             let mut job =
-                egui::text::LayoutJob::simple_singleline(name.clone(), font.clone(), CAPTION);
+                egui::text::LayoutJob::simple_singleline(name.clone(), font.clone(), caption);
             job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
             let galley = ui.painter().layout_job(job);
             let size = egui::vec2(
@@ -2438,17 +2457,17 @@ fn swatch_legend(ui: &mut egui::Ui, items: &[(Swatch, String)]) {
                 egui::pos2(rect.left() + Swatch::SIZE * 0.5, rect.center().y),
                 egui::Vec2::splat(Swatch::SIZE),
             );
-            swatch.paint(ui.painter(), swatch_rect);
+            swatch.paint(ui, swatch_rect);
             let text_top = rect.center().y - galley.size().y * 0.5;
             ui.painter().galley(
                 egui::pos2(rect.left() + text_offset, text_top),
                 galley,
-                CAPTION,
+                caption,
             );
         }
         if items.len() > LEGEND_ITEMS {
             let more = format!("+{} more", items.len() - LEGEND_ITEMS);
-            ui.label(RichText::new(more).font(font).color(CAPTION));
+            ui.label(RichText::new(more).font(font).color(caption));
         }
     });
 }
@@ -2465,11 +2484,13 @@ fn usage_table(
     let heading = |text: &str| RichText::new(text.to_owned()).weak();
     // Unlike the other cards this one hugs its table, so that the row
     // stripes reach its edges in a wide window.
-    let card = card_frame().inner_margin(10.0).show(ui, |ui| {
+    let card = card_frame(ui).inner_margin(10.0).show(ui, |ui| {
         egui::Grid::new(id)
             .spacing([12.0, 6.0])
             .min_col_width(0.0)
-            .with_row_color(|row, _| (row > 0 && row % 2 == 0).then_some(STRIPE))
+            .with_row_color(|row, style| {
+                (row > 0 && row % 2 == 0).then_some(Palette::of(&style.visuals).stripe)
+            })
             .show(ui, |ui| {
                 for title in leading {
                     ui.label(heading(title));
@@ -2523,15 +2544,16 @@ fn number_cell(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
 /// A bar that makes the totals in a column comparable at a glance.
 fn share_bar(ui: &mut egui::Ui, share: f32, color: Color32) {
     let (track, _) = ui.allocate_exact_size(SHARE_BAR_SIZE, egui::Sense::hover());
-    paint_share_bar(ui.painter(), track, share, color);
+    paint_share_bar(ui, track, share, color);
 }
 
-fn paint_share_bar(painter: &egui::Painter, track: egui::Rect, share: f32, color: Color32) {
-    painter.rect_filled(track, 3.0, Color32::from_gray(235));
+fn paint_share_bar(ui: &egui::Ui, track: egui::Rect, share: f32, color: Color32) {
+    let painter = ui.painter();
+    painter.rect_filled(track, 3.0, palette(ui).track);
     if share > 0.0 {
         let mut bar = track;
         bar.set_width((track.width() * share).max(2.0));
-        painter.rect_filled(bar, 3.0, color);
+        painter.rect_filled(bar, 3.0, data_color(ui.visuals(), color));
     }
 }
 
