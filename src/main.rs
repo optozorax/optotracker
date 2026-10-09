@@ -335,7 +335,10 @@ impl TimeTrackerApp {
             .map(|selections| selections.validated_for(&store))
             .unwrap_or_else(|| RememberedSelections::defaults_for(&store));
         let running = store.active_entry.is_some();
-        let tray = tray::TrayController::new(running);
+        let tray = tray::TrayController::new(running, {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        });
         let preferences: PersistedSettings = storage
             .and_then(|storage| eframe::get_value(storage, "opto_tracker_settings"))
             .unwrap_or_default();
@@ -489,7 +492,6 @@ impl TimeTrackerApp {
                             {
                                 self.stop_timer();
                             }
-                            ui.ctx().request_repaint_after(Duration::from_secs(1));
                         } else {
                             if ui
                                 .add_enabled(
@@ -1458,7 +1460,6 @@ impl TimeTrackerApp {
     }
 
     fn handle_window_and_tray(&mut self, ctx: &egui::Context) {
-        ctx.request_repaint_after(Duration::from_millis(200));
         if let Some(action) = self.tray.as_ref().and_then(|tray| tray.poll_action()) {
             match action {
                 tray::TrayAction::Show => {
@@ -1497,13 +1498,17 @@ impl TimeTrackerApp {
 
 impl eframe::App for TimeTrackerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let timer_reached_limit = self.store.active_entry.as_ref().is_some_and(|active| {
+        let until_limit = self.store.active_entry.as_ref().and_then(|active| {
             now()
                 .checked_sub(active.started_at.0)
-                .is_some_and(|elapsed| elapsed >= MAX_ENTRY_SECONDS)
+                .map(|elapsed| MAX_ENTRY_SECONDS.saturating_sub(elapsed))
         });
-        if timer_reached_limit {
-            self.stop_timer();
+        match until_limit {
+            Some(remaining) if remaining <= 0 => self.stop_timer(),
+            // A hidden or minimized window is otherwise never repainted, so
+            // ask to be woken when the running timer reaches its limit.
+            Some(remaining) => ctx.request_repaint_after(Duration::from_secs(remaining as u64)),
+            None => {}
         }
         self.handle_window_and_tray(ctx);
     }
@@ -1522,6 +1527,10 @@ impl eframe::App for TimeTrackerApp {
                 }
             }
             self.last_icon_running = Some(running);
+        }
+        if running && !self.window_hidden {
+            // Keep the displayed running time ticking while it can be seen.
+            ui.ctx().request_repaint_after(until_next_second());
         }
 
         egui::Panel::top("top-bar")
@@ -1967,6 +1976,13 @@ fn inline_time_field(
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// How long until `now()` changes. egui wakes up about one frame early, so the
+/// margin keeps the repaint on the far side of the second boundary.
+fn until_next_second() -> Duration {
+    let elapsed_millis = chrono::Utc::now().timestamp_subsec_millis().min(999);
+    Duration::from_millis(u64::from(1000 - elapsed_millis) + 20)
 }
 
 fn format_duration(seconds: u64) -> String {
