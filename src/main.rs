@@ -21,6 +21,7 @@ mod pagination;
 mod paths;
 mod reports;
 mod single_instance;
+mod statistics;
 mod storage;
 mod tray;
 
@@ -37,9 +38,11 @@ use model::{
 use pagination::Pagination;
 use paths::AppPaths;
 use reports::{
-    activity_stats, activity_totals, add_interval_to_days, project_activity_stats, project_stats,
-    totals_by_local_day, totals_by_week, week_start, UsageStats,
+    activity_project_stats, activity_stats, activity_totals, add_interval_to_days,
+    project_activity_stats, project_stats, totals_by_local_day, totals_by_week, week_start,
+    UsageStats,
 };
+use statistics::StatisticsView;
 use storage::JsonStore;
 
 // The button colors are dark enough for their white labels to stay readable.
@@ -65,6 +68,7 @@ const TIME_FIELD_WIDTH: f32 = 50.0;
 const NAME_FIELD_WIDTH: f32 = 180.0;
 /// Room for "100%" in the column before the totals.
 const SHARE_WIDTH: f32 = 38.0;
+const SHARE_BAR_SIZE: egui::Vec2 = egui::vec2(56.0, 6.0);
 // Room for everything to the right of a row's two drop-downs.
 const TIMER_CONTROLS_WIDTH: f32 = 264.0;
 const ENTRY_CONTROLS_WIDTH: f32 = 292.0;
@@ -75,6 +79,8 @@ const LEGEND_ITEMS: usize = 6;
 // A day with this much tracked time gets the darkest regular heat color.
 const FULL_DAY_SECONDS: f32 = 8.0 * 60.0 * 60.0;
 const NO_PROJECT_COLOR: Color32 = Color32::from_gray(125);
+/// The small print of charts and legends.
+const CAPTION: Color32 = Color32::from_rgb(87, 96, 106);
 const STRIPE: Color32 = Color32::from_rgb(246, 249, 251);
 const ROW_HOVER: Color32 = Color32::from_rgb(244, 248, 251);
 const ENTRIES_PER_PAGE: usize = 100;
@@ -307,6 +313,7 @@ enum AppView {
     Entries,
     Projects,
     Activities,
+    Statistics,
     Settings,
 }
 
@@ -424,6 +431,7 @@ struct TimeTrackerApp {
     calendar_mode: CalendarMode,
     selected_date: Option<NaiveDate>,
     entry_pagination: Pagination,
+    statistics: StatisticsView,
     last_icon_running: Option<bool>,
     tray: Option<tray::TrayController>,
     exit_requested: bool,
@@ -488,6 +496,7 @@ impl TimeTrackerApp {
             calendar_mode: remembered.calendar_mode,
             selected_date: None,
             entry_pagination: Pagination::new(ENTRIES_PER_PAGE),
+            statistics: StatisticsView::load(ctx),
             last_icon_running: None,
             tray,
             exit_requested: false,
@@ -1215,64 +1224,71 @@ impl TimeTrackerApp {
         let largest_total = largest_total(&stats);
         let mut changed = false;
         ui.add_space(8.0);
-        usage_table(
-            ui,
-            "projects",
-            &["", "", "Project", "Status"],
-            "Activities",
-            |ui| {
-                for index in (0..self.store.projects.len()).rev() {
-                    let expanded = disclosure_button(
-                        ui,
-                        egui::Id::new(("project-activities", index)),
-                        stats[index].entries > 0,
-                    );
-                    let project = &mut self.store.projects[index];
-                    changed |= color_cell(ui, &mut project.color);
-                    let name_color = match project.status {
-                        ProjectStatus::Active => ui.visuals().text_color(),
-                        ProjectStatus::Finished => ui.visuals().weak_text_color(),
-                    };
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut project.name)
-                                .min_size(egui::vec2(NAME_FIELD_WIDTH, 0.0))
-                                .desired_width(NAME_FIELD_WIDTH)
-                                .font(semibold_font(14.0))
-                                .text_color(name_color),
-                        )
-                        .changed();
-                    let status = project_status_combo(ui, index, &mut project.status);
-                    changed |= status.changed();
-                    usage_cells(ui, &stats[index], largest_total, color(project.color));
-                    number_cell(ui, stats[index].related_count.to_string());
-                    ui.end_row();
+        table_page(ui, |ui| {
+            let page_width = ui.available_width();
+            let table_width = usage_table(
+                ui,
+                "projects",
+                &["", "", "Project", "Status"],
+                "Activities",
+                |ui| {
+                    for index in (0..self.store.projects.len()).rev() {
+                        let expanded = disclosure_button(
+                            ui,
+                            egui::Id::new(("project-activities", index)),
+                            stats[index].entries > 0,
+                            "activities",
+                        );
+                        let project = &mut self.store.projects[index];
+                        changed |= color_cell(ui, &mut project.color);
+                        let name_color = match project.status {
+                            ProjectStatus::Active => ui.visuals().text_color(),
+                            ProjectStatus::Finished => ui.visuals().weak_text_color(),
+                        };
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut project.name)
+                                    .min_size(egui::vec2(NAME_FIELD_WIDTH, 0.0))
+                                    .desired_width(NAME_FIELD_WIDTH)
+                                    .font(semibold_font(14.0))
+                                    .text_color(name_color),
+                            )
+                            .changed();
+                        let status = project_status_combo(ui, index, &mut project.status);
+                        changed |= status.changed();
+                        usage_cells(ui, &stats[index], largest_total, color(project.color));
+                        number_cell(ui, stats[index].related_count.to_string());
+                        ui.end_row();
 
-                    if expanded {
-                        let activities =
-                            project_activity_stats(&self.store, ProjectId(index), current_time);
-                        let largest_total = activities
-                            .first()
-                            .map_or(0, |(_, stats)| stats.total_seconds);
-                        // The names may use the room that the status leaves
-                        // in front of the shares.
-                        let name_right = status.rect.right() - SHARE_WIDTH;
-                        for (id, usage) in &activities {
-                            let activity = &self.store.activities[id.0];
-                            ui.label("");
-                            ui.label("");
-                            let swatch = Swatch::Activity(color(activity.color));
-                            overflowing_name(ui, swatch, &activity.name, name_right);
-                            let share =
-                                format_share(usage.total_seconds, stats[index].total_seconds);
-                            number_cell(ui, RichText::new(share).weak());
-                            usage_cells(ui, usage, largest_total, color(activity.color));
-                            ui.end_row();
+                        if expanded {
+                            let activities =
+                                project_activity_stats(&self.store, ProjectId(index), current_time);
+                            let parts = PartRows {
+                                whole: stats[index].total_seconds,
+                                largest: activities
+                                    .first()
+                                    .map_or(0, |(_, stats)| stats.total_seconds),
+                                // The names may use the room that the status
+                                // leaves in front of the shares.
+                                name_right: status.rect.right() - SHARE_WIDTH,
+                            };
+                            for (id, usage) in &activities {
+                                let activity = &self.store.activities[id.0];
+                                let swatch = Swatch::Activity(color(activity.color));
+                                parts.show(ui, swatch, &activity.name, usage);
+                            }
                         }
                     }
-                }
-            },
-        );
+                },
+            );
+            ui.add_space(8.0);
+            // As wide as the table, but no wider than the window: this card
+            // is to be read without scrolling sideways.
+            ui.scope(|ui| {
+                ui.set_max_width(table_width.min(page_width));
+                statistics::project_comparison(ui, &self.store, current_time);
+            });
+        });
         if changed {
             self.save();
         }
@@ -1324,23 +1340,54 @@ impl TimeTrackerApp {
                 .then_with(|| right.cmp(left))
         });
         let largest_total = largest_total(&stats);
+        let all_seconds: u64 = stats.iter().map(|stats| stats.total_seconds).sum();
         let mut changed = false;
         ui.add_space(8.0);
-        usage_table(ui, "activities", &["", "Activity"], "Projects", |ui| {
-            for index in activity_order {
-                let activity = &mut self.store.activities[index];
-                changed |= color_cell(ui, &mut activity.color);
-                changed |= ui
-                    .add(
+        let leading = ["", "", "Activity", "Share"];
+        table_page(ui, |ui| {
+            usage_table(ui, "activities", &leading, "Projects", |ui| {
+                for index in activity_order {
+                    let expanded = disclosure_button(
+                        ui,
+                        egui::Id::new(("activity-projects", index)),
+                        stats[index].entries > 0,
+                        "projects",
+                    );
+                    let activity = &mut self.store.activities[index];
+                    changed |= color_cell(ui, &mut activity.color);
+                    let name = ui.add(
                         egui::TextEdit::singleline(&mut activity.name)
                             .min_size(egui::vec2(NAME_FIELD_WIDTH, 0.0))
                             .desired_width(NAME_FIELD_WIDTH),
-                    )
-                    .changed();
-                usage_cells(ui, &stats[index], largest_total, color(activity.color));
-                number_cell(ui, stats[index].related_count.to_string());
-                ui.end_row();
-            }
+                    );
+                    changed |= name.changed();
+                    let share = format_share(stats[index].total_seconds, all_seconds);
+                    number_cell(ui, RichText::new(share).weak());
+                    usage_cells(ui, &stats[index], largest_total, color(activity.color));
+                    number_cell(ui, stats[index].related_count.to_string());
+                    ui.end_row();
+
+                    if expanded {
+                        let projects =
+                            activity_project_stats(&self.store, ActivityId(index), current_time);
+                        let parts = PartRows {
+                            whole: stats[index].total_seconds,
+                            largest: projects.first().map_or(0, |(_, stats)| stats.total_seconds),
+                            name_right: name.rect.right(),
+                        };
+                        for (id, usage) in &projects {
+                            let project = id.and_then(|id| self.store.projects.get(id.0));
+                            let (swatch, name) = match project {
+                                Some(project) => {
+                                    (Swatch::Project(color(project.color)), &*project.name)
+                                }
+                                None => (Swatch::Empty, "No project"),
+                            };
+                            parts.show(ui, swatch, name, usage);
+                        }
+                    }
+                }
+            });
         });
         if changed {
             self.save();
@@ -1601,9 +1648,14 @@ impl eframe::App for TimeTrackerApp {
                         ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
                     app_icon::paint(ui.painter(), icon_rect, running);
                     frameless_until_hovered(ui, |ui| {
+                        // The tabs move together to fit a narrow window.
+                        if ui.available_width() < 440.0 {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                        }
                         ui.selectable_value(&mut self.view, AppView::Entries, "Time entries");
                         ui.selectable_value(&mut self.view, AppView::Projects, "Projects");
                         ui.selectable_value(&mut self.view, AppView::Activities, "Activities");
+                        ui.selectable_value(&mut self.view, AppView::Statistics, "Statistics");
                         ui.selectable_value(&mut self.view, AppView::Settings, "Settings");
                     });
                     right_aligned(ui, |ui| {
@@ -1636,6 +1688,7 @@ impl eframe::App for TimeTrackerApp {
                     AppView::Entries => self.entries_panel(ui),
                     AppView::Projects => self.projects_panel(ui),
                     AppView::Activities => self.activities_panel(ui),
+                    AppView::Statistics => self.statistics.ui(ui, &self.store, now()),
                     AppView::Settings => self.settings_panel(ui),
                 }
             });
@@ -1826,6 +1879,13 @@ enum Swatch {
 
 impl Swatch {
     const SIZE: f32 = 10.0;
+
+    fn color(self) -> Color32 {
+        match self {
+            Self::Activity(color) | Self::Project(color) => color,
+            Self::Empty => NO_PROJECT_COLOR,
+        }
+    }
 
     fn id() -> egui::Id {
         egui::Id::new("swatch")
@@ -2195,9 +2255,10 @@ fn project_status_combo(
     response
 }
 
-/// A triangle that shows or hides the rows below it. Like a collapsing header
-/// it keeps its state in egui's memory. Returns whether the rows are shown.
-fn disclosure_button(ui: &mut egui::Ui, id: egui::Id, enabled: bool) -> bool {
+/// A triangle that shows or hides the rows below it, which hold the named
+/// `parts` of its own row. Like a collapsing header it keeps its state in
+/// egui's memory. Returns whether the rows are shown.
+fn disclosure_button(ui: &mut egui::Ui, id: egui::Id, enabled: bool, parts: &str) -> bool {
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     let (response, color) = quiet_icon_button(ui, enabled, TEXT);
@@ -2225,11 +2286,33 @@ fn disclosure_button(ui: &mut egui::Ui, id: egui::Id, enabled: bool) -> bool {
         Stroke::NONE,
     ));
     response.on_hover_text(if state.is_open() {
-        "Hide the activities"
+        format!("Hide its {parts}")
     } else {
-        "Show the time of each activity"
+        format!("Show the time of its {parts}")
     });
     enabled && state.is_open()
+}
+
+/// The rows under an expanded row of a table, which split it into parts.
+struct PartRows {
+    /// The time of the expanded row.
+    whole: u64,
+    /// The time of its largest part.
+    largest: u64,
+    /// How far to the right a name may reach.
+    name_right: f32,
+}
+
+impl PartRows {
+    fn show(&self, ui: &mut egui::Ui, swatch: Swatch, name: &str, stats: &UsageStats) {
+        ui.label("");
+        ui.label("");
+        overflowing_name(ui, swatch, name, self.name_right);
+        let share = format_share(stats.total_seconds, self.whole);
+        number_cell(ui, RichText::new(share).weak());
+        usage_cells(ui, stats, self.largest, swatch.color());
+        ui.end_row();
+    }
 }
 
 /// A swatch and a name in a table cell. A name wider than its column runs on
@@ -2295,12 +2378,10 @@ fn calendar_legend(
     mode: CalendarMode,
     items: &[(Swatch, String)],
 ) {
-    let font = FontId::proportional(11.0);
-    let text_color = Color32::from_rgb(87, 96, 106);
     let caption = |text: &str| {
         RichText::new(text.to_owned())
-            .font(font.clone())
-            .color(text_color)
+            .font(FontId::proportional(11.0))
+            .color(CAPTION)
     };
     let top = ui.cursor().top();
     let area = egui::Rect::from_x_y_ranges(cells_x, top..=top + Swatch::SIZE + 4.0);
@@ -2328,80 +2409,86 @@ fn calendar_legend(
                 ui.label(caption("0h"));
             });
         } else {
-            let text_offset = Swatch::SIZE + 4.0;
-            let text_width = (ui.available_width() - text_offset).max(0.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                for (swatch, name) in items.iter().take(LEGEND_ITEMS) {
-                    // Each entry is a single widget, so that a line break
-                    // never separates a swatch from its name.
-                    let mut job = egui::text::LayoutJob::simple_singleline(
-                        name.clone(),
-                        font.clone(),
-                        text_color,
-                    );
-                    job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
-                    let galley = ui.painter().layout_job(job);
-                    let size = egui::vec2(
-                        text_offset + galley.size().x,
-                        galley.size().y.max(Swatch::SIZE),
-                    );
-                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                    let swatch_rect = egui::Rect::from_center_size(
-                        egui::pos2(rect.left() + Swatch::SIZE * 0.5, rect.center().y),
-                        egui::Vec2::splat(Swatch::SIZE),
-                    );
-                    swatch.paint(ui.painter(), swatch_rect);
-                    let text_top = rect.center().y - galley.size().y * 0.5;
-                    ui.painter().galley(
-                        egui::pos2(rect.left() + text_offset, text_top),
-                        galley,
-                        text_color,
-                    );
-                }
-                if items.len() > LEGEND_ITEMS {
-                    ui.label(caption(&format!("+{} more", items.len() - LEGEND_ITEMS)));
-                }
-            });
+            swatch_legend(ui, items);
+        }
+    });
+}
+
+/// The names behind some colors, in a line that wraps. Only the first few
+/// are spelled out.
+fn swatch_legend(ui: &mut egui::Ui, items: &[(Swatch, String)]) {
+    let font = FontId::proportional(11.0);
+    let text_offset = Swatch::SIZE + 4.0;
+    let text_width = (ui.available_width() - text_offset).max(0.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        for (swatch, name) in items.iter().take(LEGEND_ITEMS) {
+            // Each entry is a single widget, so that a line break never
+            // separates a swatch from its name.
+            let mut job =
+                egui::text::LayoutJob::simple_singleline(name.clone(), font.clone(), CAPTION);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
+            let galley = ui.painter().layout_job(job);
+            let size = egui::vec2(
+                text_offset + galley.size().x,
+                galley.size().y.max(Swatch::SIZE),
+            );
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let swatch_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.left() + Swatch::SIZE * 0.5, rect.center().y),
+                egui::Vec2::splat(Swatch::SIZE),
+            );
+            swatch.paint(ui.painter(), swatch_rect);
+            let text_top = rect.center().y - galley.size().y * 0.5;
+            ui.painter().galley(
+                egui::pos2(rect.left() + text_offset, text_top),
+                galley,
+                CAPTION,
+            );
+        }
+        if items.len() > LEGEND_ITEMS {
+            let more = format!("+{} more", items.len() - LEGEND_ITEMS);
+            ui.label(RichText::new(more).font(font).color(CAPTION));
         }
     });
 }
 
 /// The Projects and Activities tables share their statistics columns, which
-/// follow the `leading` ones.
+/// follow the `leading` ones. Returns the width of the table's card.
 fn usage_table(
     ui: &mut egui::Ui,
     id: &str,
     leading: &[&str],
     related: &str,
     rows: impl FnOnce(&mut egui::Ui),
-) {
+) -> f32 {
     let heading = |text: &str| RichText::new(text.to_owned()).weak();
-    ScrollArea::both()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Unlike the other cards this one hugs its table, so that the
-            // row stripes reach its edges in a wide window.
-            card_frame().inner_margin(10.0).show(ui, |ui| {
-                egui::Grid::new(id)
-                    .spacing([12.0, 6.0])
-                    .min_col_width(0.0)
-                    .with_row_color(|row, _| (row > 0 && row % 2 == 0).then_some(STRIPE))
-                    .show(ui, |ui| {
-                        for title in leading {
-                            ui.label(heading(title));
-                        }
-                        number_cell(ui, heading("Total"));
-                        ui.label("");
-                        for title in ["Entries", "Active days", "First used", "Last used", related]
-                        {
-                            number_cell(ui, heading(title));
-                        }
-                        ui.end_row();
-                        rows(ui);
-                    });
+    // Unlike the other cards this one hugs its table, so that the row
+    // stripes reach its edges in a wide window.
+    let card = card_frame().inner_margin(10.0).show(ui, |ui| {
+        egui::Grid::new(id)
+            .spacing([12.0, 6.0])
+            .min_col_width(0.0)
+            .with_row_color(|row, _| (row > 0 && row % 2 == 0).then_some(STRIPE))
+            .show(ui, |ui| {
+                for title in leading {
+                    ui.label(heading(title));
+                }
+                number_cell(ui, heading("Total"));
+                ui.label("");
+                for title in ["Entries", "Active days", "First used", "Last used", related] {
+                    number_cell(ui, heading(title));
+                }
+                ui.end_row();
+                rows(ui);
             });
-        });
+    });
+    card.response.rect.width()
+}
+
+/// A page that scrolls both ways, for a table that is wider than the window.
+fn table_page(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ScrollArea::both().auto_shrink([false, false]).show(ui, add);
 }
 
 /// The statistics columns of one row, up to the count that ends it.
@@ -2435,13 +2522,16 @@ fn number_cell(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
 
 /// A bar that makes the totals in a column comparable at a glance.
 fn share_bar(ui: &mut egui::Ui, share: f32, color: Color32) {
-    let (track, _) = ui.allocate_exact_size(egui::vec2(56.0, 6.0), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(track, 3.0, Color32::from_gray(235));
+    let (track, _) = ui.allocate_exact_size(SHARE_BAR_SIZE, egui::Sense::hover());
+    paint_share_bar(ui.painter(), track, share, color);
+}
+
+fn paint_share_bar(painter: &egui::Painter, track: egui::Rect, share: f32, color: Color32) {
+    painter.rect_filled(track, 3.0, Color32::from_gray(235));
     if share > 0.0 {
         let mut bar = track;
         bar.set_width((track.width() * share).max(2.0));
-        ui.painter().rect_filled(bar, 3.0, color);
+        painter.rect_filled(bar, 3.0, color);
     }
 }
 
@@ -2572,6 +2662,19 @@ fn format_stat_duration(seconds: u64) -> String {
             "{seconds} {}",
             if seconds == 1 { "second" } else { "seconds" }
         )
+    }
+}
+
+/// A duration to the minute, or to the hour once the minutes stop mattering.
+fn format_hours_minutes(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = seconds % 3600 / 60;
+    if hours >= 100 {
+        format!("{hours} h")
+    } else if hours > 0 {
+        format!("{hours} h {minutes} m")
+    } else {
+        format!("{minutes} m")
     }
 }
 

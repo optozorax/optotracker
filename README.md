@@ -31,8 +31,16 @@ limited to 24 hours; a forgotten running timer stops at that limit. Day and
 week totals split overnight entries at the computer's local midnight. The
 full-width
 Projects and Activities views support renaming, color editing, and usage statistics;
-projects also support status editing, and a project's row can be expanded to
-show the same statistics for each of its activities. The calendar shows the current
+projects also support status editing. A project's row can be expanded to
+show the same statistics for each of its activities, and an activity's row
+for each of its projects. Below its table the Projects view compares how
+the time of each project divides among activities. The Statistics view sums
+up a week, a month, a year, all time or a custom range of days: the totals
+and how they changed from the period before, the time per day, week or month
+divided by activity or project, and the activities and projects that the
+period went to. Below that it shows habits: the average weekday, the hours
+of the day, the length of sessions and streaks of days. The calendar shows
+the current
 year, preceded by earlier weeks when the window is wide enough for them, and
 can be dragged or paged in either direction. It can show time intensity,
 project colors, or activity colors; colored cells show each day's time proportions.
