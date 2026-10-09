@@ -11,7 +11,7 @@ use eframe::egui::{
     RichText, Stroke, StrokeKind, Ui, Widget,
 };
 
-const BUTTON_SIZE: egui::Vec2 = egui::vec2(30.0, 26.0);
+const BUTTON_SIZE: egui::Vec2 = egui::vec2(22.0, 22.0);
 const POPUP_WIDTH: f32 = 292.0;
 const POPUP_ESTIMATED_HEIGHT: f32 = 292.0;
 
@@ -66,13 +66,12 @@ impl Widget for DatePickerButton<'_> {
             Color32::TRANSPARENT
         };
         ui.painter().rect_filled(response.rect, 3.0, fill);
-        ui.painter().text(
-            response.rect.center(),
-            Align2::CENTER_CENTER,
-            "📆",
-            FontId::proportional(17.0),
-            ui.visuals().text_color(),
-        );
+        let icon_color = if response.hovered() || state.open {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        paint_calendar_icon(ui.painter(), response.rect.center(), icon_color);
 
         if state.open {
             let screen = ui.ctx().content_rect();
@@ -292,6 +291,16 @@ impl DatePickerPopup<'_> {
             });
         });
         action
+    }
+}
+
+fn paint_calendar_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let stroke = Stroke::new(1.2, color);
+    let page = egui::Rect::from_center_size(center + egui::vec2(0.0, 1.0), egui::vec2(12.0, 10.0));
+    painter.rect_stroke(page, 2.0, stroke, StrokeKind::Inside);
+    painter.hline(page.x_range(), page.top() + 3.5, stroke);
+    for x in [page.left() + 3.5, page.right() - 3.5] {
+        painter.vline(x, (page.top() - 2.0)..=(page.top() + 1.0), stroke);
     }
 }
 

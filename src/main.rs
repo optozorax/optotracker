@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDate};
 use eframe::egui::{
-    self, Align, Align2, AtomExt, Button, Color32, ComboBox, FontData, FontDefinitions, FontFamily,
-    FontId, Frame, Layout, RichText, ScrollArea, Stroke,
+    self, Align, Align2, Atom, AtomExt, Atoms, Button, Color32, ComboBox, FontData,
+    FontDefinitions, FontFamily, FontId, Frame, Layout, RichText, ScrollArea, Stroke,
 };
 
 mod app_icon;
@@ -42,12 +42,39 @@ use reports::{
 };
 use storage::JsonStore;
 
-const BLUE: Color32 = Color32::from_rgb(3, 169, 244);
-const RED: Color32 = Color32::from_rgb(244, 67, 54);
-const PAGE: Color32 = Color32::from_rgb(242, 247, 250);
-const HEADER: Color32 = Color32::from_rgb(228, 236, 241);
-const BORDER: Color32 = Color32::from_rgb(218, 227, 232);
-const SELECTOR_HEIGHT: f32 = 30.0;
+// The button colors are dark enough for their white labels to stay readable.
+const BLUE: Color32 = Color32::from_rgb(0, 118, 200);
+const RED: Color32 = Color32::from_rgb(211, 47, 47);
+const GREEN: Color32 = Color32::from_rgb(56, 142, 60);
+const TEXT: Color32 = Color32::from_rgb(34, 40, 47);
+// The page is nearly white, so cards are told apart by their borders and
+// their tinted headers.
+const PAGE: Color32 = Color32::from_rgb(249, 250, 252);
+const HEADER: Color32 = Color32::from_rgb(235, 241, 246);
+const BORDER: Color32 = Color32::from_rgb(203, 212, 220);
+const HAIRLINE: Color32 = Color32::from_rgb(226, 232, 237);
+const OUTLINE: Color32 = Color32::from_rgb(196, 205, 213);
+const HOVER: Color32 = Color32::from_rgb(238, 243, 247);
+const PRESSED: Color32 = Color32::from_rgb(224, 231, 237);
+const SELECTION: Color32 = Color32::from_rgb(214, 232, 248);
+const SELECTION_TEXT: Color32 = Color32::from_rgb(0, 84, 150);
+const ROW_HEIGHT: f32 = 26.0;
+const TIMER_HEIGHT: f32 = 34.0;
+const TIMER_BUTTON_WIDTH: f32 = 84.0;
+const TIME_FIELD_WIDTH: f32 = 50.0;
+const NAME_FIELD_WIDTH: f32 = 180.0;
+// Room for everything to the right of a row's two drop-downs.
+const TIMER_CONTROLS_WIDTH: f32 = 264.0;
+const ENTRY_CONTROLS_WIDTH: f32 = 292.0;
+const MIN_SELECTOR_WIDTH: f32 = 110.0;
+const MAX_SELECTOR_WIDTH: f32 = 300.0;
+const CALENDAR_PAGE_WEEKS: i32 = 13;
+const LEGEND_ITEMS: usize = 6;
+// A day with this much tracked time gets the darkest regular heat color.
+const FULL_DAY_SECONDS: f32 = 8.0 * 60.0 * 60.0;
+const NO_PROJECT_COLOR: Color32 = Color32::from_gray(125);
+const STRIPE: Color32 = Color32::from_rgb(246, 249, 251);
+const ROW_HOVER: Color32 = Color32::from_rgb(244, 248, 251);
 const ENTRIES_PER_PAGE: usize = 100;
 const UI_SELECTIONS_MEMORY_ID: &str = "opto_tracker_ui_selections_v1";
 
@@ -100,8 +127,8 @@ fn main() -> eframe::Result {
             .with_title("OptoTracker")
             .with_icon(app_icon::icon_data(false))
             .with_visible(true)
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([820.0, 560.0]),
+            .with_inner_size([720.0, 620.0])
+            .with_min_inner_size([420.0, 320.0]),
         persistence_path: Some(app_paths.persistence.clone()),
         ..Default::default()
     };
@@ -110,6 +137,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
+            configure_style(&cc.egui_ctx);
             configure_fonts(&cc.egui_ctx);
             Ok(Box::new(TimeTrackerApp::load(
                 repository.clone(),
@@ -123,68 +151,153 @@ fn main() -> eframe::Result {
     )
 }
 
+fn configure_style(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        for (text_style, size) in [
+            (egui::TextStyle::Body, 14.0),
+            (egui::TextStyle::Button, 14.0),
+            (egui::TextStyle::Small, 11.0),
+        ] {
+            style
+                .text_styles
+                .insert(text_style, FontId::proportional(size));
+        }
+        style.spacing.button_padding = egui::vec2(7.0, 2.0);
+        style.spacing.interact_size.y = 24.0;
+
+        let visuals = &mut style.visuals;
+        visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+        visuals.selection.bg_fill = SELECTION;
+        visuals.selection.stroke.color = SELECTION_TEXT;
+
+        // Buttons and fields are white with an outline. egui's own idle look
+        // is a gray fill for buttons and no outline at all for text fields
+        // and checkboxes, which makes those disappear on the white cards.
+        let widgets = &mut visuals.widgets;
+        widgets.noninteractive.fg_stroke.color = TEXT;
+        widgets.inactive.fg_stroke.color = TEXT;
+        widgets.inactive.weak_bg_fill = Color32::WHITE;
+        widgets.inactive.bg_stroke = Stroke::new(1.0, OUTLINE);
+        widgets.hovered.weak_bg_fill = HOVER;
+        widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(150));
+        widgets.active.weak_bg_fill = PRESSED;
+        widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_gray(110));
+        widgets.open.weak_bg_fill = HOVER;
+        for state in [
+            &mut widgets.noninteractive,
+            &mut widgets.inactive,
+            &mut widgets.hovered,
+            &mut widgets.active,
+            &mut widgets.open,
+        ] {
+            state.corner_radius = egui::CornerRadius::same(4);
+        }
+    });
+}
+
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    let family = project_font_family();
-    let mut project_fonts = Vec::new();
+    // The system's UI font is easier to read at small sizes than egui's light
+    // default, which remains the fallback for icons and for systems without
+    // these files.
+    let regular = load_font(&mut fonts, "regular", &[r"C:\Windows\Fonts\segoeui.ttf"]);
+    let semibold = load_font(
+        &mut fonts,
+        "semibold",
+        &[
+            r"C:\Windows\Fonts\seguisb.ttf",
+            r"C:\Windows\Fonts\segoeuib.ttf",
+            r"C:\Windows\Fonts\arialbd.ttf",
+        ],
+    );
 
-    for path in [
-        r"C:\Windows\Fonts\segoeuib.ttf",
-        r"C:\Windows\Fonts\arialbd.ttf",
-    ] {
-        if let Ok(bytes) = fs::read(path) {
-            let name = "project-bold".to_owned();
-            fonts.font_data.insert(
-                name.clone(),
-                std::sync::Arc::new(FontData::from_owned(bytes)),
-            );
-            project_fonts.push(name);
-            break;
-        }
+    let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
+    if let Some(regular) = regular {
+        proportional.insert(0, regular);
     }
-
-    if let Some(fallbacks) = fonts.families.get(&FontFamily::Proportional) {
-        project_fonts.extend(fallbacks.iter().cloned());
-    }
-    fonts.families.insert(family, project_fonts);
+    let mut semibold_fonts: Vec<String> = semibold.into_iter().collect();
+    semibold_fonts.extend(proportional.iter().cloned());
+    fonts
+        .families
+        .insert(semibold_font_family(), semibold_fonts);
     ctx.set_fonts(fonts);
 }
 
-fn project_font_family() -> FontFamily {
-    FontFamily::Name("ProjectBold".into())
-}
-
-fn project_font() -> FontId {
-    FontId::new(14.0, project_font_family())
-}
-
-fn project_text(text: impl Into<String>, text_color: Color32) -> RichText {
-    RichText::new(text.into())
-        .font(project_font())
-        .color(text_color)
-}
-
-fn total_label(ui: &mut egui::Ui, prefix: &str, seconds: u64, text_color: Color32) {
-    let mut text = egui::text::LayoutJob::default();
-    text.append(
-        prefix,
-        0.0,
-        egui::TextFormat {
-            font_id: FontId::new(14.0, FontFamily::Proportional),
-            color: text_color,
-            ..Default::default()
-        },
+/// Registers the first font file that can be read and returns its name.
+fn load_font(fonts: &mut FontDefinitions, name: &str, paths: &[&str]) -> Option<String> {
+    let bytes = paths.iter().find_map(|path| fs::read(path).ok())?;
+    fonts.font_data.insert(
+        name.to_owned(),
+        std::sync::Arc::new(FontData::from_owned(bytes)),
     );
-    text.append(
-        &format_duration(seconds),
-        0.0,
-        egui::TextFormat {
-            font_id: project_font(),
-            color: text_color,
-            ..Default::default()
-        },
-    );
-    ui.label(text);
+    Some(name.to_owned())
+}
+
+fn semibold_font_family() -> FontFamily {
+    FontFamily::Name("Semibold".into())
+}
+
+fn semibold_font(size: f32) -> FontId {
+    FontId::new(size, semibold_font_family())
+}
+
+/// Text that stands out by weight. `RichText::strong` only darkens it.
+fn semibold(text: impl Into<String>) -> RichText {
+    RichText::new(text.into()).font(semibold_font(14.0))
+}
+
+/// Shows `text` with every digit in a slot of the same width.
+///
+/// The digits of the interface font differ in width. Drawn as ordinary text,
+/// a running clock would change its width every second and push around
+/// whatever is laid out next to it.
+fn tabular_digits(ui: &mut egui::Ui, text: &str, font: FontId, color: Color32) -> egui::Response {
+    // Whole pixels keep the slots evenly spaced after text is snapped to them.
+    let pixels_per_point = ui.pixels_per_point();
+    let whole_pixels = |width: f32| (width * pixels_per_point).ceil() / pixels_per_point;
+    let (widths, height) = ui.fonts_mut(|fonts| {
+        let digit_width = ('0'..='9')
+            .map(|digit| fonts.glyph_width(&font, digit))
+            .fold(0.0, f32::max);
+        let widths: Vec<f32> = text
+            .chars()
+            .map(|character| {
+                whole_pixels(if character.is_ascii_digit() {
+                    digit_width
+                } else {
+                    fonts.glyph_width(&font, character)
+                })
+            })
+            .collect();
+        (widths, fonts.row_height(&font))
+    });
+
+    let size = egui::vec2(widths.iter().sum(), height);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let mut left = rect.left();
+    for (character, width) in text.chars().zip(widths) {
+        ui.painter().text(
+            egui::pos2(left + width * 0.5, rect.center().y),
+            Align2::CENTER_CENTER,
+            character,
+            font.clone(),
+            color,
+        );
+        left += width;
+    }
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
+    response
+}
+
+/// A caption and a duration at the right edge of a row.
+fn total_label(ui: &mut egui::Ui, caption: &str, seconds: u64) {
+    right_aligned(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let color = ui.visuals().text_color();
+        tabular_digits(ui, &format_duration(seconds), semibold_font(14.0), color);
+        ui.label(caption);
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -457,97 +570,83 @@ impl TimeTrackerApp {
     fn timer_panel(&mut self, ui: &mut egui::Ui) {
         let activities = activity_options(&self.store, now());
         let projects = project_options(&self.store);
+        let layout = RowLayout::new(
+            ui.available_width(),
+            TIMER_CONTROLS_WIDTH,
+            ui.spacing().item_spacing.x,
+        );
+        let can_start = !activities.is_empty();
         let mut active_changed = false;
-        let panel_width = ui.available_width();
-        Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .inner_margin(18.0)
-            .show(ui, |ui| {
-                ui.set_min_width((panel_width - 38.0).max(0.0));
-                ui.horizontal(|ui| {
-                    ui.set_height(42.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let started_at = self
-                            .store
-                            .active_entry
-                            .as_ref()
-                            .map(|active| active.started_at.0);
-                        let elapsed = started_at
-                            .map(|started_at| {
-                                (now().checked_sub(started_at).unwrap_or(0).max(0) as u64)
-                                    .min(MAX_ENTRY_SECONDS as u64)
-                            })
-                            .unwrap_or(0);
-                        if started_at.is_some() {
-                            if ui
-                                .add_sized(
-                                    [90.0, 36.0],
-                                    Button::new(RichText::new("STOP").color(Color32::WHITE))
-                                        .fill(RED),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .clicked()
-                            {
-                                self.stop_timer();
-                            }
-                        } else {
-                            if ui
-                                .add_enabled(
-                                    !activities.is_empty(),
-                                    Button::new(RichText::new("START").color(Color32::WHITE))
-                                        .fill(BLUE)
-                                        .min_size(egui::vec2(90.0, 36.0)),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .clicked()
-                            {
-                                self.start_timer();
-                            }
-                        }
-                        ui.add_sized(
-                            [105.0, 42.0],
-                            egui::Label::new(
-                                RichText::new(format_duration(elapsed)).size(20.0).strong(),
-                            ),
-                        );
-
-                        ui.separator();
-                        self.active_start_field(ui);
-                        let selector_width = 220.0 + 190.0 + ui.spacing().item_spacing.x;
-                        ui.add_space((ui.available_width() - selector_width).max(0.0));
-
-                        let project = self
-                            .store
-                            .active_entry
-                            .as_mut()
-                            .map(|entry| &mut entry.project)
-                            .unwrap_or(&mut self.draft_project);
-                        let project_changed =
-                            project_combo(ui, "timer-project", project, &projects);
-                        active_changed |= self.store.active_entry.is_some() && project_changed;
-
-                        if let Some(active) = self.store.active_entry.as_mut() {
-                            active_changed |= activity_combo(
-                                ui,
-                                "active-activity",
-                                &mut active.activity,
-                                &activities,
-                            );
-                        } else {
-                            activity_combo(
-                                ui,
-                                "draft-activity",
-                                &mut self.draft_activity,
-                                &activities,
-                            );
-                        }
-                    });
-                });
+        row(ui, TIMER_HEIGHT, |ui| {
+            active_changed =
+                self.timer_selectors(ui, &activities, &projects, layout.selector_width);
+            if !layout.two_lines {
+                right_aligned(ui, |ui| self.timer_controls(ui, can_start));
+            }
+        });
+        if layout.two_lines {
+            row(ui, TIMER_HEIGHT, |ui| {
+                right_aligned(ui, |ui| self.timer_controls(ui, can_start));
             });
+        }
         if active_changed {
             self.save();
         }
+    }
+
+    /// The activity and project of the running timer, or of the next one.
+    /// Returns whether the running timer was changed.
+    fn timer_selectors(
+        &mut self,
+        ui: &mut egui::Ui,
+        activities: &[ActivityOption],
+        projects: &[ProjectOption],
+        width: f32,
+    ) -> bool {
+        let size = egui::vec2(width, TIMER_HEIGHT - 2.0);
+        let (activity, project) = match self.store.active_entry.as_mut() {
+            Some(active) => (&mut active.activity, &mut active.project),
+            None => (&mut self.draft_activity, &mut self.draft_project),
+        };
+        let place = SelectorPlace::Timer;
+        let changed = activity_selector(ui, "timer-activity", activity, activities, size, place)
+            | project_selector(ui, "timer-project", project, projects, size, place);
+        changed && self.store.active_entry.is_some()
+    }
+
+    /// Laid out from the right: the button, the clock and the start time.
+    fn timer_controls(&mut self, ui: &mut egui::Ui, can_start: bool) {
+        let started_at = self
+            .store
+            .active_entry
+            .as_ref()
+            .map(|active| active.started_at.0);
+        let button = |text: &str, fill: Color32| {
+            Button::new(semibold(text).color(Color32::WHITE))
+                .fill(fill)
+                .stroke(Stroke::NONE)
+                .min_size(egui::vec2(TIMER_BUTTON_WIDTH, TIMER_HEIGHT - 2.0))
+        };
+        if started_at.is_some() {
+            if ui.add(button("STOP", RED)).clicked() {
+                self.stop_timer();
+            }
+        } else if ui.add_enabled(can_start, button("START", BLUE)).clicked() {
+            self.start_timer();
+        }
+
+        let (elapsed, color) = match started_at {
+            Some(started_at) => (
+                (now().checked_sub(started_at).unwrap_or(0).max(0) as u64)
+                    .min(MAX_ENTRY_SECONDS as u64),
+                ui.visuals().text_color(),
+            ),
+            None => (0, ui.visuals().weak_text_color()),
+        };
+        ui.add_space(6.0);
+        tabular_digits(ui, &format_duration(elapsed), semibold_font(24.0), color);
+        ui.add_space(6.0);
+        self.active_start_field(ui);
     }
 
     fn active_start_field(&mut self, ui: &mut egui::Ui) {
@@ -577,7 +676,7 @@ impl TimeTrackerApp {
             .add(
                 egui::TextEdit::singleline(&mut edit.time)
                     .id_salt("active-start-time")
-                    .desired_width(52.0)
+                    .desired_width(TIME_FIELD_WIDTH)
                     .horizontal_align(Align::Center),
             )
             .on_hover_text("Start time (HH:MM); later times count as yesterday");
@@ -622,7 +721,7 @@ impl TimeTrackerApp {
                         let (label, segment_color) = project
                             .and_then(|index| self.store.projects.get(index))
                             .map(|project| (project.name.clone(), color(project.color)))
-                            .unwrap_or_else(|| ("No project".to_owned(), Color32::from_gray(125)));
+                            .unwrap_or_else(|| ("No project".to_owned(), NO_PROJECT_COLOR));
                         CalendarContribution {
                             label,
                             detail: format_duration(seconds),
@@ -703,104 +802,146 @@ impl TimeTrackerApp {
                 egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
             )
             .show(ui, |ui| {
-                let activity_width = ui.available_width();
-                let calendar_change = Frame::new()
-                    .fill(Color32::WHITE)
-                    .stroke(Stroke::new(1.0, BORDER))
-                    .inner_margin(14.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width((activity_width - 30.0).max(0.0));
+                let calendar_change = card(ui, |ui| {
+                    // The controls sit above the cells, which are centered
+                    // in a wide window. Their extent is known from the
+                    // previous frame.
+                    let mut controls = ui.available_rect_before_wrap();
+                    let cells_x = self.calendar.cells_x_range();
+                    if cells_x.span() > 0.0 {
+                        controls = controls.intersect(egui::Rect::everything_right_of(cells_x.min));
+                        controls = controls.intersect(egui::Rect::everything_left_of(cells_x.max));
+                    }
+                    controls.set_height(ui.spacing().interact_size.y);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
                         ui.horizontal(|ui| {
-                            ui.heading("Activity");
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.selectable_value(
-                                    &mut self.calendar_mode,
-                                    CalendarMode::Activities,
-                                    "Activities",
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                ui.selectable_value(
-                                    &mut self.calendar_mode,
-                                    CalendarMode::Projects,
-                                    "Projects",
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                ui.selectable_value(
-                                    &mut self.calendar_mode,
-                                    CalendarMode::Time,
-                                    "Time",
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if ui.button("⏴").on_hover_text("Earlier").clicked() {
+                                self.calendar.scroll_weeks(CALENDAR_PAGE_WEEKS);
+                            }
+                            if ui.button("⏵").on_hover_text("Later").clicked() {
+                                self.calendar.scroll_weeks(-CALENDAR_PAGE_WEEKS);
+                            }
+                            if self.calendar.is_scrolled() && ui.button("This year").clicked() {
+                                self.calendar.reset_scroll();
+                            }
+                            right_aligned(ui, |ui| {
+                                frameless_until_hovered(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.calendar_mode,
+                                        CalendarMode::Activities,
+                                        "Activities",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.calendar_mode,
+                                        CalendarMode::Projects,
+                                        "Projects",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.calendar_mode,
+                                        CalendarMode::Time,
+                                        "Time",
+                                    );
+                                });
                             });
                         });
-                        let calendar_mode = self.calendar_mode;
-                        self.calendar.ui(
-                            ui,
-                            today,
-                            self.selected_date,
-                            |date| match calendar_mode {
-                                CalendarMode::Time => day_totals
+                    });
+                    let calendar_mode = self.calendar_mode;
+                    let change = self.calendar.ui(
+                        ui,
+                        today,
+                        self.selected_date,
+                        |date| match calendar_mode {
+                            CalendarMode::Time => day_totals
+                                .get(&date)
+                                .map(|day| {
+                                    CellFill::Solid(heat_color(
+                                        day.seconds as f32 / FULL_DAY_SECONDS,
+                                    ))
+                                })
+                                .unwrap_or(CellFill::Empty),
+                            CalendarMode::Projects => project_segments
+                                .get(&date)
+                                .map(|segments| CellFill::Segmented(segments))
+                                .unwrap_or(CellFill::Empty),
+                            CalendarMode::Activities => activity_segments
+                                .get(&date)
+                                .map(|segments| CellFill::Segmented(segments))
+                                .unwrap_or(CellFill::Empty),
+                        },
+                        |ui, date| {
+                            ui.set_min_width(220.0);
+                            ui.label(local_time::format_date_with_weekday(date));
+                            ui.label(
+                                day_totals
                                     .get(&date)
-                                    .map(|day| {
-                                        CellFill::Solid(heat_color(
-                                            day.seconds as f32 / (8.0 * 60.0 * 60.0),
-                                        ))
-                                    })
-                                    .unwrap_or(CellFill::Empty),
-                                CalendarMode::Projects => project_segments
-                                    .get(&date)
-                                    .map(|segments| CellFill::Segmented(segments))
-                                    .unwrap_or(CellFill::Empty),
-                                CalendarMode::Activities => activity_segments
-                                    .get(&date)
-                                    .map(|segments| CellFill::Segmented(segments))
-                                    .unwrap_or(CellFill::Empty),
-                            },
-                            |ui, date| {
-                                ui.set_min_width(220.0);
-                                ui.label(local_time::format_date_with_weekday(date));
-                                ui.label(
-                                    day_totals
-                                        .get(&date)
-                                        .map(|day| format_duration(day.seconds))
-                                        .unwrap_or_else(|| "No time tracked".to_owned()),
-                                );
-                                if calendar_mode != CalendarMode::Time {
-                                    let contributions = match calendar_mode {
-                                        CalendarMode::Projects => project_contributions.get(&date),
-                                        CalendarMode::Activities => {
-                                            activity_contributions.get(&date)
-                                        }
-                                        CalendarMode::Time => None,
-                                    };
-                                    if let Some(contributions) = contributions {
-                                        ui.separator();
-                                        for contribution in contributions {
-                                            ui.horizontal(|ui| {
-                                                let (swatch, _) = ui.allocate_exact_size(
-                                                    egui::vec2(10.0, 10.0),
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(
-                                                    swatch,
-                                                    2.0,
-                                                    contribution.color,
-                                                );
-                                                ui.label(&contribution.label);
-                                                ui.with_layout(
-                                                    Layout::right_to_left(Align::Center),
-                                                    |ui| {
-                                                        ui.label(&contribution.detail);
-                                                    },
-                                                );
+                                    .map(|day| format_duration(day.seconds))
+                                    .unwrap_or_else(|| "No time tracked".to_owned()),
+                            );
+                            if calendar_mode != CalendarMode::Time {
+                                let contributions = match calendar_mode {
+                                    CalendarMode::Projects => project_contributions.get(&date),
+                                    CalendarMode::Activities => activity_contributions.get(&date),
+                                    CalendarMode::Time => None,
+                                };
+                                if let Some(contributions) = contributions {
+                                    ui.separator();
+                                    for contribution in contributions {
+                                        ui.horizontal(|ui| {
+                                            let (swatch, _) = ui.allocate_exact_size(
+                                                egui::vec2(10.0, 10.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                swatch,
+                                                2.0,
+                                                contribution.color,
+                                            );
+                                            ui.label(&contribution.label);
+                                            right_aligned(ui, |ui| {
+                                                ui.label(&contribution.detail);
                                             });
-                                        }
+                                        });
                                     }
                                 }
-                            },
-                        )
-                    })
-                    .inner;
+                            }
+                        },
+                    );
+
+                    let shown = day_totals
+                        .range(self.calendar.visible_days(today))
+                        .map(|(_, day)| day);
+                    let legend = match calendar_mode {
+                        CalendarMode::Time => Vec::new(),
+                        CalendarMode::Projects => {
+                            legend_items(shown.flat_map(|day| &day.by_project), |project| {
+                                Some(
+                                    match project.and_then(|index| self.store.projects.get(index)) {
+                                        Some(project) => (
+                                            Swatch::Project(color(project.color)),
+                                            project.name.clone(),
+                                        ),
+                                        None => (
+                                            Swatch::Project(NO_PROJECT_COLOR),
+                                            "No project".to_owned(),
+                                        ),
+                                    },
+                                )
+                            })
+                        }
+                        CalendarMode::Activities => {
+                            legend_items(shown.flat_map(|day| &day.by_activity), |activity| {
+                                self.store.activities.get(activity).map(|activity| {
+                                    (
+                                        Swatch::Activity(color(activity.color)),
+                                        activity.name.clone(),
+                                    )
+                                })
+                            })
+                        }
+                    };
+                    calendar_legend(ui, self.calendar.cells_x_range(), calendar_mode, &legend);
+                    change
+                });
                 match calendar_change {
                     CalendarSelectionChange::Select(date) => {
                         self.selected_date = Some(date);
@@ -813,7 +954,7 @@ impl TimeTrackerApp {
                     }
                     CalendarSelectionChange::Unchanged => {}
                 }
-                ui.add_space(12.0);
+                ui.add_space(8.0);
                 pagination_controls(ui, &mut self.entry_pagination, entry_count);
 
                 let visible_entries = self.entry_pagination.visible_range(entry_count);
@@ -842,124 +983,121 @@ impl TimeTrackerApp {
                     let entry_week = week_start(date);
                     if current_week != Some(entry_week) {
                         current_week = Some(entry_week);
-                        ui.add_space(18.0);
+                        ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            ui.heading(week_title(entry_week, this_week));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                total_label(
-                                    ui,
-                                    "Week total: ",
-                                    week_totals.get(&entry_week).copied().unwrap_or(0),
-                                    ui.visuals().text_color(),
-                                );
-                            });
+                            section_title(ui, &week_title(entry_week, this_week));
+                            total_label(
+                                ui,
+                                "Week total:",
+                                week_totals.get(&entry_week).copied().unwrap_or(0),
+                            );
                         });
                     }
-                    ui.add_space(8.0);
-                    Frame::new()
-                        .fill(HEADER)
-                        .inner_margin(egui::Margin::symmetric(14, 9))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(day_title(date, today))
-                                        .color(Color32::from_gray(90))
-                                        .strong(),
-                                );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    let indices = entries_by_day.get(&date).cloned().unwrap_or_default();
+                    // One card per day: a header, then the entries divided by hairlines.
+                    card_frame().show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        Frame::new()
+                            .fill(HEADER)
+                            .corner_radius(egui::CornerRadius {
+                                nw: 4,
+                                ne: 4,
+                                sw: 0,
+                                se: 0,
+                            })
+                            .inner_margin(egui::Margin::symmetric(10, 5))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(semibold(day_title(date, today)));
                                     total_label(
                                         ui,
-                                        "Day total: ",
+                                        "Day total:",
                                         day_totals.get(&date).map_or(0, |day| day.seconds),
-                                        Color32::from_gray(90),
                                     );
                                 });
                             });
-                        });
-                    let indices = entries_by_day.get(&date).cloned().unwrap_or_default();
-                    if indices.is_empty() {
-                        Frame::new()
-                            .fill(Color32::WHITE)
-                            .stroke(Stroke::new(1.0, BORDER))
-                            .inner_margin(egui::Margin::symmetric(14, 10))
-                            .show(ui, |ui| {
+                        if indices.is_empty() {
+                            hairline(ui);
+                            entry_frame().show(ui, |ui| {
                                 ui.label(
                                     RichText::new("Time carried over from an overnight entry")
-                                        .color(Color32::from_gray(115)),
+                                        .weak(),
                                 );
                             });
-                    }
-                    for index in indices {
-                        let entry = &mut self.store.time_entries[index];
-                        let entry_id = entry.id;
-                        Frame::new()
-                            .fill(Color32::WHITE)
-                            .stroke(Stroke::new(1.0, BORDER))
-                            .inner_margin(egui::Margin::symmetric(14, 10))
-                            .show(ui, |ui| {
-                                // Establish the final row height before egui places the first
-                                // widget. Otherwise these selectors are positioned before the
-                                // taller icon buttons on the right enlarge the row.
-                                ui.set_height(SELECTOR_HEIGHT);
-                                ui.horizontal(|ui| {
-                                    changed |= activity_combo(
+                        }
+                        for index in indices {
+                            hairline(ui);
+                            let entry = &mut self.store.time_entries[index];
+                            let entry_id = entry.id;
+                            let highlight = ui.painter().add(egui::Shape::Noop);
+                            let frame = entry_frame().show(ui, |ui| {
+                                let layout = RowLayout::new(
+                                    ui.available_width(),
+                                    ENTRY_CONTROLS_WIDTH,
+                                    ui.spacing().item_spacing.x,
+                                );
+                                let mut controls = None;
+                                row(ui, ROW_HEIGHT, |ui| {
+                                    changed |= entry_selectors(
                                         ui,
-                                        ("entry-activity", entry_id),
-                                        &mut entry.activity,
+                                        entry,
                                         &activities,
-                                    );
-                                    changed |= project_combo(
-                                        ui,
-                                        ("entry-project", entry_id),
-                                        &mut entry.project,
                                         &projects,
+                                        layout.selector_width,
                                     );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if cross_icon_button(ui) {
-                                            delete = Some(entry_id);
-                                        }
-                                        if play_icon_button(ui, can_start) {
-                                            start_request = Some((entry.activity, entry.project));
-                                        }
-                                        ui.separator();
-                                        ui.label(
-                                            RichText::new(format_duration(
-                                                entry.time.duration_seconds().unwrap_or(0),
-                                            ))
-                                            .size(18.0)
-                                            .strong(),
-                                        );
-                                        if let Some(date) =
-                                            entry_date_picker(ui, entry_id, entry.time)
-                                        {
-                                            date_commits.push(DateEditRequest { entry_id, date });
-                                        }
-                                        if let Some(edit) = inline_time_field(
-                                            ui,
-                                            &mut self.time_edit_buffers,
-                                            entry_id,
-                                            TimeEndpoint::Stop,
-                                            stop_label(entry.time),
-                                        ) {
-                                            time_commits.push(edit);
-                                        }
-                                        ui.label("-");
-                                        if let Some(edit) = inline_time_field(
-                                            ui,
-                                            &mut self.time_edit_buffers,
-                                            entry_id,
-                                            TimeEndpoint::Start,
-                                            start_label(entry.time),
-                                        ) {
-                                            time_commits.push(edit);
-                                        }
-                                    });
+                                    if !layout.two_lines {
+                                        controls = Some(right_aligned(ui, |ui| {
+                                            entry_controls(
+                                                ui,
+                                                entry,
+                                                &mut self.time_edit_buffers,
+                                                can_start,
+                                            )
+                                        }));
+                                    }
                                 });
+                                if layout.two_lines {
+                                    row(ui, ROW_HEIGHT, |ui| {
+                                        controls = Some(right_aligned(ui, |ui| {
+                                            entry_controls(
+                                                ui,
+                                                entry,
+                                                &mut self.time_edit_buffers,
+                                                can_start,
+                                            )
+                                        }));
+                                    });
+                                }
+                                if let Some(controls) = controls {
+                                    if controls.delete {
+                                        delete = Some(entry_id);
+                                    }
+                                    if controls.restart {
+                                        start_request = Some((entry.activity, entry.project));
+                                    }
+                                    time_commits.extend(controls.time_edits);
+                                    date_commits.extend(
+                                        controls
+                                            .date
+                                            .map(|date| DateEditRequest { entry_id, date }),
+                                    );
+                                }
                             });
-                    }
+                            let row_rect = frame.response.rect;
+                            if ui.rect_contains_pointer(row_rect) {
+                                ui.painter().set(
+                                    highlight,
+                                    egui::Shape::rect_filled(row_rect, 0.0, ROW_HOVER),
+                                );
+                            }
+                        }
+                    });
                 }
 
-                ui.add_space(16.0);
+                ui.add_space(10.0);
                 pagination_controls(ui, &mut self.entry_pagination, entry_count);
             });
         if let Some(entry_id) = delete {
@@ -1034,38 +1172,20 @@ impl TimeTrackerApp {
     }
 
     fn projects_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Projects");
-            ui.label(
-                RichText::new(format!("{} projects", self.store.projects.len()))
-                    .color(Color32::from_gray(110)),
-            );
-        });
-        ui.label(
-            "Rename projects, change their color or finish them. Vector order remains stable.",
-        );
-        ui.add_space(12.0);
         let mut add_clicked = false;
-        let add_row_width = ui.available_width();
-        Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .inner_margin(14.0)
-            .show(ui, |ui| {
-                ui.set_min_width((add_row_width - 30.0).max(0.0));
-                ui.horizontal(|ui| {
-                    ui.label("New project");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_project_name).desired_width(220.0),
-                    );
-                    ui.color_edit_button_srgb(&mut self.new_project_color)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    add_clicked = ui
-                        .button("Add")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked();
-                });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_project_name)
+                    .hint_text("New project")
+                    .desired_width(220.0),
+            );
+            ui.color_edit_button_srgb(&mut self.new_project_color)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            add_clicked = ui.button("Add").clicked();
+            right_aligned(ui, |ui| {
+                count_label(ui, format!("{} projects", self.store.projects.len()));
             });
+        });
         if add_clicked {
             let name = self.new_project_name.trim();
             if name.is_empty() {
@@ -1090,98 +1210,57 @@ impl TimeTrackerApp {
         let stats: Vec<UsageStats> = (0..self.store.projects.len())
             .map(|index| project_stats(&self.store, ProjectId(index), current_time))
             .collect();
+        let largest_total = largest_total(&stats);
         let mut changed = false;
-        ui.add_space(12.0);
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .scroll_bar_visibility(
-                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
-            )
-            .show(ui, |ui| {
+        ui.add_space(8.0);
+        usage_table(
+            ui,
+            "projects",
+            &["", "Project", "Status"],
+            "Activities",
+            |ui| {
                 for index in (0..self.store.projects.len()).rev() {
                     let project = &mut self.store.projects[index];
-                    let stats = &stats[index];
-                    let row_width = ui.available_width();
-                    Frame::new()
-                        .fill(Color32::WHITE)
-                        .stroke(Stroke::new(1.0, BORDER))
-                        .inner_margin(14.0)
-                        .show(ui, |ui| {
-                            ui.set_min_width((row_width - 30.0).max(0.0));
-                            ui.horizontal(|ui| {
-                                let mut rgb =
-                                    [project.color.red, project.color.green, project.color.blue];
-                                if ui
-                                    .color_edit_button_srgb(&mut rgb)
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .changed()
-                                {
-                                    project.color = RgbColor {
-                                        red: rgb[0],
-                                        green: rgb[1],
-                                        blue: rgb[2],
-                                    };
-                                    changed = true;
-                                }
-                                changed |= ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut project.name)
-                                            .desired_width(260.0)
-                                            .font(project_font())
-                                            .text_color(color(project.color)),
-                                    )
-                                    .changed();
-                                changed |= project_status_combo(ui, index, &mut project.status);
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                stat_label(ui, "Total", format_stat_duration(stats.total_seconds));
-                                stat_label(ui, "Entries", stats.entries.to_string());
-                                stat_label(ui, "Active days", stats.active_days.to_string());
-                                stat_label(ui, "First used", format_stat_date(stats.first_used));
-                                stat_label(ui, "Last used", format_stat_date(stats.last_used));
-                                stat_label(ui, "Activities", stats.related_count.to_string());
-                            });
-                        });
-                    ui.add_space(8.0);
+                    changed |= color_cell(ui, &mut project.color);
+                    let name_color = match project.status {
+                        ProjectStatus::Active => ui.visuals().text_color(),
+                        ProjectStatus::Finished => ui.visuals().weak_text_color(),
+                    };
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut project.name)
+                                .min_size(egui::vec2(NAME_FIELD_WIDTH, 0.0))
+                                .desired_width(NAME_FIELD_WIDTH)
+                                .font(semibold_font(14.0))
+                                .text_color(name_color),
+                        )
+                        .changed();
+                    changed |= project_status_combo(ui, index, &mut project.status);
+                    usage_cells(ui, &stats[index], largest_total, color(project.color));
+                    ui.end_row();
                 }
-            });
+            },
+        );
         if changed {
             self.save();
         }
     }
 
     fn activities_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Activities");
-            ui.label(
-                RichText::new(format!("{} activities", self.store.activities.len()))
-                    .color(Color32::from_gray(110)),
-            );
-        });
-        ui.label("Activity IDs stay stable while names can be edited.");
-        ui.add_space(12.0);
         let mut add_clicked = false;
-        let add_row_width = ui.available_width();
-        Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .inner_margin(14.0)
-            .show(ui, |ui| {
-                ui.set_min_width((add_row_width - 30.0).max(0.0));
-                ui.horizontal(|ui| {
-                    ui.label("New activity");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_activity_name)
-                            .desired_width(260.0),
-                    );
-                    ui.color_edit_button_srgb(&mut self.new_activity_color)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    add_clicked = ui
-                        .button("Add")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked();
-                });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_activity_name)
+                    .hint_text("New activity")
+                    .desired_width(220.0),
+            );
+            ui.color_edit_button_srgb(&mut self.new_activity_color)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            add_clicked = ui.button("Add").clicked();
+            right_aligned(ui, |ui| {
+                count_label(ui, format!("{} activities", self.store.activities.len()));
             });
+        });
         if add_clicked {
             let name = self.new_activity_name.trim();
             if name.is_empty() {
@@ -1212,247 +1291,195 @@ impl TimeTrackerApp {
                 .cmp(&stats[*left].total_seconds)
                 .then_with(|| right.cmp(left))
         });
+        let largest_total = largest_total(&stats);
         let mut changed = false;
-        ui.add_space(12.0);
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .scroll_bar_visibility(
-                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
-            )
-            .show(ui, |ui| {
-                for index in activity_order {
-                    let activity = &mut self.store.activities[index];
-                    let stats = &stats[index];
-                    let row_width = ui.available_width();
-                    Frame::new()
-                        .fill(Color32::WHITE)
-                        .stroke(Stroke::new(1.0, BORDER))
-                        .inner_margin(14.0)
-                        .show(ui, |ui| {
-                            ui.set_min_width((row_width - 30.0).max(0.0));
-                            ui.horizontal(|ui| {
-                                let mut rgb = [
-                                    activity.color.red,
-                                    activity.color.green,
-                                    activity.color.blue,
-                                ];
-                                if ui
-                                    .color_edit_button_srgb(&mut rgb)
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .changed()
-                                {
-                                    activity.color = RgbColor {
-                                        red: rgb[0],
-                                        green: rgb[1],
-                                        blue: rgb[2],
-                                    };
-                                    changed = true;
-                                }
-                                changed |= ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut activity.name)
-                                            .desired_width(300.0)
-                                            .text_color(color(activity.color)),
-                                    )
-                                    .changed();
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                stat_label(ui, "Total", format_stat_duration(stats.total_seconds));
-                                stat_label(ui, "Entries", stats.entries.to_string());
-                                stat_label(ui, "Active days", stats.active_days.to_string());
-                                stat_label(ui, "First used", format_stat_date(stats.first_used));
-                                stat_label(ui, "Last used", format_stat_date(stats.last_used));
-                                stat_label(ui, "Projects", stats.related_count.to_string());
-                            });
-                        });
-                    ui.add_space(8.0);
-                }
-            });
+        ui.add_space(8.0);
+        usage_table(ui, "activities", &["", "Activity"], "Projects", |ui| {
+            for index in activity_order {
+                let activity = &mut self.store.activities[index];
+                changed |= color_cell(ui, &mut activity.color);
+                changed |= ui
+                    .add(
+                        egui::TextEdit::singleline(&mut activity.name)
+                            .min_size(egui::vec2(NAME_FIELD_WIDTH, 0.0))
+                            .desired_width(NAME_FIELD_WIDTH),
+                    )
+                    .changed();
+                usage_cells(ui, &stats[index], largest_total, color(activity.color));
+                ui.end_row();
+            }
+        });
         if changed {
             self.save();
         }
     }
 
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("Installation, storage and Windows startup behavior.")
-                .color(Color32::from_gray(95)),
-        );
-        if !self.settings_message.is_empty() {
-            ui.add_space(6.0);
-            ui.label(RichText::new(&self.settings_message).color(BLUE));
-        }
-        ui.add_space(18.0);
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.settings_contents(ui));
+    }
 
-        let width = ui.available_width();
-        Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .inner_margin(18.0)
-            .show(ui, |ui| {
-                ui.set_min_width((width - 38.0).max(0.0));
-                ui.heading("Application folder");
-                ui.label(RichText::new(self.app_paths.directory.display().to_string()).monospace());
-                ui.label(
-                    RichText::new(
-                        "The installed executable and UI persistence are stored in this folder.",
-                    )
-                    .color(Color32::from_gray(105)),
-                );
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(if desktop::is_installed(&self.app_paths) {
-                            "Update installed app"
-                        } else {
-                            "Install OptoTracker here"
-                        })
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        match desktop::install_current_executable(&self.app_paths) {
-                            Ok(()) => {
-                                self.settings_message = "OptoTracker was installed.".to_owned();
-                                if self.autorun_enabled {
-                                    if let Err(error) = desktop::set_autorun(
-                                        &self.app_paths,
-                                        true,
-                                        self.preferences.start_minimized_on_autorun,
-                                    ) {
-                                        self.settings_message = error;
-                                    }
+    fn settings_contents(&mut self, ui: &mut egui::Ui) {
+        if !self.settings_message.is_empty() {
+            ui.label(RichText::new(&self.settings_message).color(BLUE));
+            ui.add_space(6.0);
+        }
+
+        card(ui, |ui| {
+            section_title(ui, "Application folder");
+            ui.label(RichText::new(self.app_paths.directory.display().to_string()).monospace());
+            ui.label(
+                RichText::new(
+                    "The installed executable and UI persistence are stored in this folder.",
+                )
+                .color(Color32::from_gray(105)),
+            );
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(if desktop::is_installed(&self.app_paths) {
+                        "Update installed app"
+                    } else {
+                        "Install OptoTracker here"
+                    })
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    match desktop::install_current_executable(&self.app_paths) {
+                        Ok(()) => {
+                            self.settings_message = "OptoTracker was installed.".to_owned();
+                            if self.autorun_enabled {
+                                if let Err(error) = desktop::set_autorun(
+                                    &self.app_paths,
+                                    true,
+                                    self.preferences.start_minimized_on_autorun,
+                                ) {
+                                    self.settings_message = error;
                                 }
                             }
-                            Err(error) => self.settings_message = error,
                         }
+                        Err(error) => self.settings_message = error,
                     }
-                    if ui
-                        .button("Open folder")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        if let Err(error) = desktop::open_app_directory(&self.app_paths) {
-                            self.settings_message = error;
-                        }
-                    }
-                    if ui
-                        .button("Create desktop shortcut")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        match desktop::create_desktop_shortcut(&self.app_paths) {
-                            Ok(()) => {
-                                self.settings_message = "Desktop shortcut created.".to_owned();
-                            }
-                            Err(error) => self.settings_message = error,
-                        }
-                    }
-                });
-                ui.add_space(10.0);
-                if desktop::is_installed(&self.app_paths) {
-                    ui.horizontal(|ui| {
-                        ui.label("Installed executable:");
-                        ui.label(RichText::new(paths::EXECUTABLE_FILE).monospace());
-                    });
-                } else {
-                    ui.label("OptoTracker is not installed in this folder yet.");
                 }
-                ui.horizontal(|ui| {
-                    ui.label("Data:");
-                    ui.label(
-                        RichText::new(self.repository.path().display().to_string()).monospace(),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Persistence:");
-                    ui.label(
-                        RichText::new(self.app_paths.persistence.display().to_string()).monospace(),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Weekly backups:");
-                    ui.label(RichText::new("backups").monospace());
-                });
-            });
-
-        ui.add_space(14.0);
-        Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .inner_margin(18.0)
-            .show(ui, |ui| {
-                ui.set_min_width((width - 38.0).max(0.0));
-                ui.heading("Windows behavior");
-                ui.add_space(8.0);
-
-                let mut autorun = self.autorun_enabled;
                 if ui
-                    .checkbox(&mut autorun, "Start OptoTracker when I sign in")
+                    .button("Open folder")
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .changed()
+                    .clicked()
                 {
-                    let result = if autorun {
-                        desktop::install_current_executable(&self.app_paths).and_then(|()| {
-                            desktop::set_autorun(
-                                &self.app_paths,
-                                true,
-                                self.preferences.start_minimized_on_autorun,
-                            )
-                        })
-                    } else {
-                        desktop::set_autorun(&self.app_paths, false, false)
-                    };
-                    match result {
-                        Ok(()) => {
-                            self.autorun_enabled = autorun;
-                            self.settings_message = if autorun {
-                                "Windows autorun enabled.".to_owned()
-                            } else {
-                                "Windows autorun disabled".to_owned()
-                            };
-                        }
-                        Err(error) => self.settings_message = error,
+                    if let Err(error) = desktop::open_app_directory(&self.app_paths) {
+                        self.settings_message = error;
                     }
                 }
-                let minimized_changed = ui
-                    .checkbox(
-                        &mut self.preferences.start_minimized_on_autorun,
-                        "Start minimized to tray on autorun",
-                    )
+                if ui
+                    .button("Create desktop shortcut")
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .changed();
-                if minimized_changed && self.autorun_enabled {
-                    match desktop::set_autorun(
-                        &self.app_paths,
-                        true,
-                        self.preferences.start_minimized_on_autorun,
-                    ) {
+                    .clicked()
+                {
+                    match desktop::create_desktop_shortcut(&self.app_paths) {
                         Ok(()) => {
-                            self.settings_message = "Autorun behavior updated.".to_owned();
+                            self.settings_message = "Desktop shortcut created.".to_owned();
                         }
                         Err(error) => self.settings_message = error,
                     }
                 }
-
-                ui.add_space(6.0);
-                ui.add_enabled(
-                    self.tray.is_some(),
-                    egui::Checkbox::new(
-                        &mut self.preferences.close_or_minimize_to_tray,
-                        "Send OptoTracker to the tray when closed or minimized",
-                    ),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            });
+            ui.add_space(10.0);
+            if desktop::is_installed(&self.app_paths) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Installed executable:");
+                    ui.label(RichText::new(paths::EXECUTABLE_FILE).monospace());
+                });
+            } else {
+                ui.label("OptoTracker is not installed in this folder yet.");
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Data:");
+                ui.label(RichText::new(self.repository.path().display().to_string()).monospace());
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Persistence:");
                 ui.label(
-                    RichText::new(
-                        "When disabled, minimizing behaves normally and closing exits the app.",
-                    )
-                    .small()
-                    .color(Color32::from_gray(105)),
+                    RichText::new(self.app_paths.persistence.display().to_string()).monospace(),
                 );
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Weekly backups:");
+                ui.label(RichText::new("backups").monospace());
+            });
+        });
+
+        ui.add_space(8.0);
+        card(ui, |ui| {
+            section_title(ui, "Windows behavior");
+            ui.add_space(4.0);
+
+            let mut autorun = self.autorun_enabled;
+            if ui
+                .checkbox(&mut autorun, "Start OptoTracker when I sign in")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .changed()
+            {
+                let result = if autorun {
+                    desktop::install_current_executable(&self.app_paths).and_then(|()| {
+                        desktop::set_autorun(
+                            &self.app_paths,
+                            true,
+                            self.preferences.start_minimized_on_autorun,
+                        )
+                    })
+                } else {
+                    desktop::set_autorun(&self.app_paths, false, false)
+                };
+                match result {
+                    Ok(()) => {
+                        self.autorun_enabled = autorun;
+                        self.settings_message = if autorun {
+                            "Windows autorun enabled.".to_owned()
+                        } else {
+                            "Windows autorun disabled".to_owned()
+                        };
+                    }
+                    Err(error) => self.settings_message = error,
+                }
+            }
+            let minimized_changed = ui
+                .checkbox(
+                    &mut self.preferences.start_minimized_on_autorun,
+                    "Start minimized to tray on autorun",
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .changed();
+            if minimized_changed && self.autorun_enabled {
+                match desktop::set_autorun(
+                    &self.app_paths,
+                    true,
+                    self.preferences.start_minimized_on_autorun,
+                ) {
+                    Ok(()) => {
+                        self.settings_message = "Autorun behavior updated.".to_owned();
+                    }
+                    Err(error) => self.settings_message = error,
+                }
+            }
+
+            ui.add_space(6.0);
+            ui.add_enabled(
+                self.tray.is_some(),
+                egui::Checkbox::new(
+                    &mut self.preferences.close_or_minimize_to_tray,
+                    "Send OptoTracker to the tray when closed or minimized",
+                ),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+            ui.label(
+                RichText::new(
+                    "When disabled, minimizing behaves normally and closing exits the app.",
+                )
+                .small()
+                .color(Color32::from_gray(105)),
+            );
+        });
     }
 
     fn handle_window_and_tray(&mut self, ctx: &egui::Context) {
@@ -1530,48 +1557,50 @@ impl eframe::App for TimeTrackerApp {
         }
 
         egui::Panel::top("top-bar")
-            .exact_size(58.0)
-            .frame(Frame::new().fill(Color32::WHITE).inner_margin(14.0))
+            .frame(
+                Frame::new()
+                    .fill(Color32::WHITE)
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                row(ui, ROW_HEIGHT, |ui| {
                     let (icon_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+                        ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
                     app_icon::paint(ui.painter(), icon_rect, running);
-                    ui.label(RichText::new("OptoTracker").size(24.0).strong());
-                    ui.add_space(20.0);
-                    ui.selectable_value(&mut self.view, AppView::Entries, "Time entries")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    ui.selectable_value(&mut self.view, AppView::Projects, "Projects")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    ui.selectable_value(&mut self.view, AppView::Activities, "Activities")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    ui.selectable_value(&mut self.view, AppView::Settings, "Settings")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    frameless_until_hovered(ui, |ui| {
+                        ui.selectable_value(&mut self.view, AppView::Entries, "Time entries");
+                        ui.selectable_value(&mut self.view, AppView::Projects, "Projects");
+                        ui.selectable_value(&mut self.view, AppView::Activities, "Activities");
+                        ui.selectable_value(&mut self.view, AppView::Settings, "Settings");
+                    });
+                    right_aligned(ui, |ui| {
                         if !self.message.is_empty() {
-                            ui.label(RichText::new(&self.message).color(Color32::from_gray(110)));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&self.message).color(Color32::from_gray(110)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&self.message);
                         }
                     });
                 });
             });
+        if self.view == AppView::Entries {
+            egui::Panel::top("timer")
+                .frame(
+                    Frame::new()
+                        .fill(Color32::WHITE)
+                        .inner_margin(egui::Margin::symmetric(12, 8)),
+                )
+                .show(ui, |ui| self.timer_panel(ui));
+        }
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(PAGE).inner_margin(24.0))
+            .frame(Frame::new().fill(PAGE).inner_margin(12.0))
             .show(ui, |ui| {
                 ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 match self.view {
-                    AppView::Entries => {
-                        ui.horizontal(|ui| {
-                            ui.heading("Time entries");
-                            ui.label(
-                                RichText::new(format!("{} entries", self.store.time_entries.len()))
-                                    .color(Color32::from_gray(110)),
-                            );
-                        });
-                        ui.add_space(12.0);
-                        self.timer_panel(ui);
-                        ui.add_space(18.0);
-                        self.entries_panel(ui);
-                    }
+                    AppView::Entries => self.entries_panel(ui),
                     AppView::Projects => self.projects_panel(ui),
                     AppView::Activities => self.activities_panel(ui),
                     AppView::Settings => self.settings_panel(ui),
@@ -1600,20 +1629,18 @@ fn pagination_controls(ui: &mut egui::Ui, pagination: &mut Pagination, total_ent
 
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!("Showing {first}-{last} of {total_entries}"))
+            RichText::new(format!("{first}–{last} of {total_entries}"))
                 .color(Color32::from_gray(105)),
         );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        right_aligned(ui, |ui| {
             if ui
                 .add_enabled(pagination.has_next(total_entries), Button::new("Next"))
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
                 pagination.next(total_entries);
             }
             if ui
                 .add_enabled(pagination.has_previous(), Button::new("Previous"))
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
                 pagination.previous();
@@ -1670,226 +1697,657 @@ fn project_options(store: &Store) -> Vec<ProjectOption> {
         .collect()
 }
 
-fn activity_combo(
+fn activity_selector(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     value: &mut ActivityId,
     activities: &[ActivityOption],
+    size: egui::Vec2,
+    place: SelectorPlace,
 ) -> bool {
     let before = *value;
-    let selected = activities
+    let (swatch, text) = activities
         .iter()
         .find(|activity| activity.id == *value)
-        .map(|activity| RichText::new(&activity.name).color(activity.color))
-        .unwrap_or_else(|| RichText::new("Choose activity").color(Color32::from_gray(30)));
-    invisible_combo(ui, id, selected, 220.0, |ui| {
+        .map(|activity| {
+            (
+                Swatch::Activity(activity.color),
+                RichText::new(&activity.name),
+            )
+        })
+        .unwrap_or_else(|| (Swatch::Empty, RichText::new("Choose activity").weak()));
+    let style = match place {
+        SelectorPlace::Timer => SelectorStyle::Button,
+        SelectorPlace::Entry => SelectorStyle::Quiet,
+    };
+    selector(ui, id, swatch, text, size, style, |ui| {
         for activity in activities {
-            ui.selectable_value(
-                value,
-                activity.id,
-                RichText::new(&activity.name).color(activity.color),
-            );
+            let selected = *value == activity.id;
+            let swatch = Swatch::Activity(activity.color);
+            if swatch_item(ui, selected, swatch, RichText::new(&activity.name)).clicked() {
+                *value = activity.id;
+            }
         }
     });
     *value != before
 }
 
-fn project_combo(
+fn project_selector(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     value: &mut Option<ProjectId>,
     projects: &[ProjectOption],
+    size: egui::Vec2,
+    place: SelectorPlace,
 ) -> bool {
     let before = *value;
-    let selected = value
-        .and_then(|id| projects.iter().find(|project| project.id == id))
-        .map(|project| project_text(&project.name, project.color))
-        .unwrap_or_else(|| project_text("No project", Color32::from_gray(110)));
-    invisible_combo(ui, id, selected, 190.0, |ui| {
-        for project in projects
-            .iter()
-            .rev()
-            .filter(|project| project.status == ProjectStatus::Active)
-        {
-            ui.selectable_value(
-                value,
-                Some(project.id),
-                project_text(&project.name, project.color),
-            );
-        }
+    let no_project = || RichText::new("No project").weak();
+    let current = value.and_then(|id| projects.iter().find(|project| project.id == id));
+    let (swatch, text) = current
+        .map(|project| (Swatch::Project(project.color), semibold(&project.name)))
+        .unwrap_or_else(|| (Swatch::Empty, no_project()));
+    let style = match (place, current) {
+        (SelectorPlace::Timer, _) => SelectorStyle::Button,
+        (SelectorPlace::Entry, Some(project)) => SelectorStyle::Tag(project.color),
+        (SelectorPlace::Entry, None) => SelectorStyle::Quiet,
+    };
+    selector(ui, id, swatch, text, size, style, |ui| {
+        let mut items = |ui: &mut egui::Ui, status: ProjectStatus| {
+            for project in projects
+                .iter()
+                .rev()
+                .filter(|project| project.status == status)
+            {
+                let selected = *value == Some(project.id);
+                let swatch = Swatch::Project(project.color);
+                if swatch_item(ui, selected, swatch, semibold(&project.name)).clicked() {
+                    *value = Some(project.id);
+                }
+            }
+        };
+        items(ui, ProjectStatus::Active);
         if projects
             .iter()
             .any(|project| project.status == ProjectStatus::Finished)
         {
             ui.separator();
-            for project in projects
-                .iter()
-                .rev()
-                .filter(|project| project.status == ProjectStatus::Finished)
-            {
-                ui.selectable_value(
-                    value,
-                    Some(project.id),
-                    project_text(&project.name, project.color),
-                );
-            }
+            items(ui, ProjectStatus::Finished);
         }
         ui.separator();
-        ui.selectable_value(
-            value,
-            None,
-            project_text("No project", Color32::from_gray(110)),
-        );
+        if swatch_item(ui, value.is_none(), Swatch::Empty, no_project()).clicked() {
+            *value = None;
+        }
     });
     *value != before
 }
 
-fn invisible_combo(
+/// The color marker drawn in front of an activity or project name. The
+/// names themselves keep the normal text color, so that a light color does
+/// not make them unreadable.
+#[derive(Clone, Copy)]
+enum Swatch {
+    Activity(Color32),
+    Project(Color32),
+    Empty,
+}
+
+impl Swatch {
+    const SIZE: f32 = 10.0;
+
+    fn id() -> egui::Id {
+        egui::Id::new("swatch")
+    }
+
+    fn paint(self, painter: &egui::Painter, rect: egui::Rect) {
+        match self {
+            Self::Activity(color) => {
+                painter.circle_filled(rect.center(), rect.width() * 0.5, color);
+            }
+            Self::Project(color) => {
+                painter.rect_filled(rect, 2.0, color);
+            }
+            Self::Empty => {
+                painter.rect_stroke(
+                    rect,
+                    2.0,
+                    Stroke::new(1.0, Color32::from_gray(175)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+    }
+}
+
+/// A swatch followed by `text`. A growing text fills the button and stays
+/// left-aligned in it.
+fn swatch_atoms<'a>(text: RichText, grow: bool) -> Atoms<'a> {
+    Atoms::new((
+        Atom::custom(Swatch::id(), egui::Vec2::splat(Swatch::SIZE)),
+        text.atom_grow(grow).atom_align(Align2::LEFT_CENTER),
+    ))
+}
+
+/// Shows a button built from [`swatch_atoms`] and paints its swatch.
+fn swatch_button(ui: &mut egui::Ui, swatch: Swatch, button: Button<'_>) -> egui::Response {
+    let response = button.atom_ui(ui);
+    if let Some(rect) = response.rect(Swatch::id()) {
+        swatch.paint(ui.painter(), rect);
+    }
+    response.response
+}
+
+fn swatch_item(
+    ui: &mut egui::Ui,
+    selected: bool,
+    swatch: Swatch,
+    text: RichText,
+) -> egui::Response {
+    let atoms = swatch_atoms(text, true);
+    swatch_button(ui, swatch, Button::selectable(selected, atoms))
+}
+
+#[derive(Clone, Copy)]
+enum SelectorPlace {
+    Timer,
+    Entry,
+}
+
+#[derive(Clone, Copy)]
+enum SelectorStyle {
+    /// A regular button with a drop-down arrow.
+    Button,
+    /// Bare text that gets a button frame only while it is hovered, which
+    /// keeps a long list of selectors quiet.
+    Quiet,
+    /// A rounded tag tinted with the given color, no wider than its text.
+    Tag(Color32),
+}
+
+/// A drop-down showing the current choice as a swatch and a name, truncated
+/// to fit `size`.
+fn selector(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
-    selected: RichText,
-    width: f32,
+    swatch: Swatch,
+    text: RichText,
+    size: egui::Vec2,
+    style: SelectorStyle,
     contents: impl FnOnce(&mut egui::Ui),
 ) {
     ui.push_id(id, |ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, SELECTOR_HEIGHT),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                let button = Button::new(selected.atom_grow(true).atom_align(Align2::LEFT_CENTER))
-                    .frame(false)
-                    .min_size(egui::vec2(width, SELECTOR_HEIGHT));
-                let (response, _) =
-                    egui::containers::menu::MenuButton::from_button(button).ui(ui, contents);
-                response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            },
-        );
+        ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+            let response = match style {
+                SelectorStyle::Button => {
+                    let mut atoms = swatch_atoms(text, true);
+                    atoms.push_right(RichText::new("⏷").small().weak());
+                    swatch_button(ui, swatch, Button::new(atoms).truncate().min_size(size))
+                }
+                SelectorStyle::Quiet => frameless_until_hovered(ui, |ui| {
+                    let button = Button::new(swatch_atoms(text, true))
+                        .truncate()
+                        .frame_when_inactive(false)
+                        .min_size(size);
+                    swatch_button(ui, swatch, button)
+                }),
+                SelectorStyle::Tag(color) => {
+                    // The button looks its own state up in the same way, so
+                    // the tint follows the pointer one frame late.
+                    let hovered = ui
+                        .ctx()
+                        .read_response(ui.next_auto_id())
+                        .is_some_and(|response| response.hovered());
+                    let tint = color.gamma_multiply(if hovered { 0.3 } else { 0.16 });
+                    let button = Button::new(swatch_atoms(text, false))
+                        .truncate()
+                        .fill(tint)
+                        .stroke(Stroke::NONE)
+                        .corner_radius(size.y * 0.5);
+                    swatch_button(ui, swatch, button)
+                }
+            };
+            // Long lists scroll instead of running past the edge of a small window.
+            let max_height = (ui.ctx().content_rect().height() - 80.0).clamp(120.0, 360.0);
+            egui::Popup::menu(&response).show(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ScrollArea::vertical()
+                    .max_height(max_height)
+                    .show(ui, contents);
+            });
+        });
     });
 }
 
-fn bright_combo<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+/// Shows buttons that are drawn without a frame until they are hovered.
+///
+/// egui pads a button for the outline of its current state even while no
+/// frame is drawn. Idle widgets get an outline in [`configure_style`], so
+/// without this a label would shift by its width when the frame appears.
+fn frameless_until_hovered<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
-        let widgets = &mut ui.visuals_mut().widgets;
-        for visuals in [
-            &mut widgets.inactive,
-            &mut widgets.hovered,
-            &mut widgets.active,
-            &mut widgets.open,
-        ] {
-            visuals.bg_fill = Color32::WHITE;
-            visuals.weak_bg_fill = Color32::WHITE;
-            visuals.bg_stroke = Stroke::new(1.0, Color32::from_rgb(168, 192, 202));
-            visuals.fg_stroke = Stroke::new(1.5, Color32::from_rgb(45, 142, 184));
-        }
+        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
         add(ui)
     })
     .inner
 }
 
-fn play_icon_button(ui: &mut egui::Ui, enabled: bool) -> bool {
-    let response = ui.add_enabled(
-        enabled,
-        Button::new("")
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(egui::vec2(30.0, 26.0)),
-    );
-    let response = if enabled {
-        response.on_hover_cursor(egui::CursorIcon::PointingHand)
-    } else {
-        response
-    };
-    let fill = if !enabled {
-        Color32::from_gray(210)
-    } else if response.is_pointer_button_down_on() {
-        Color32::from_rgb(46, 125, 50)
-    } else if response.hovered() {
-        Color32::from_rgb(67, 160, 71)
-    } else {
-        Color32::from_rgb(76, 175, 80)
-    };
+/// How a row divides its width between its two drop-downs and the controls
+/// to their right. A window too narrow for both moves the controls to a
+/// second line.
+struct RowLayout {
+    selector_width: f32,
+    two_lines: bool,
+}
+
+impl RowLayout {
+    fn new(available: f32, controls: f32, spacing: f32) -> Self {
+        let beside_controls = (available - controls - 2.0 * spacing) / 2.0;
+        if beside_controls >= MIN_SELECTOR_WIDTH {
+            Self {
+                selector_width: beside_controls.min(MAX_SELECTOR_WIDTH),
+                two_lines: false,
+            }
+        } else {
+            Self {
+                selector_width: ((available - spacing) / 2.0).max(0.0),
+                two_lines: true,
+            }
+        }
+    }
+}
+
+/// A horizontal strip with vertically centered contents. Its height is fixed
+/// up front because egui places each widget before it knows that a taller
+/// one will follow.
+fn row<R>(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.set_height(height);
+        add(ui)
+    })
+    .inner
+}
+
+fn right_aligned<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.with_layout(Layout::right_to_left(Align::Center), add)
+        .inner
+}
+
+fn card_frame() -> Frame {
+    Frame::new()
+        .fill(Color32::WHITE)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(5)
+}
+
+/// A white panel that spans the available width.
+fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    card_frame()
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+fn entry_frame() -> Frame {
+    Frame::new().inner_margin(egui::Margin::symmetric(10, 2))
+}
+
+fn hairline(ui: &mut egui::Ui) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter()
-        .rect_filled(response.rect, egui::CornerRadius::same(3), fill);
-    let center = response.rect.center();
-    let icon_color = if enabled {
-        Color32::WHITE
+        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, HAIRLINE));
+}
+
+fn section_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).font(semibold_font(15.0)));
+}
+
+fn count_label(ui: &mut egui::Ui, text: String) {
+    ui.add(egui::Label::new(RichText::new(text).weak()).truncate());
+}
+
+fn entry_selectors(
+    ui: &mut egui::Ui,
+    entry: &mut model::TimeEntry,
+    activities: &[ActivityOption],
+    projects: &[ProjectOption],
+    width: f32,
+) -> bool {
+    let size = egui::vec2(width, ROW_HEIGHT);
+    let activity_id = ("entry-activity", entry.id);
+    let project_id = ("entry-project", entry.id);
+    let place = SelectorPlace::Entry;
+    activity_selector(
+        ui,
+        activity_id,
+        &mut entry.activity,
+        activities,
+        size,
+        place,
+    ) | project_selector(ui, project_id, &mut entry.project, projects, size, place)
+}
+
+struct EntryControls {
+    delete: bool,
+    restart: bool,
+    time_edits: Vec<TimeEditRequest>,
+    date: Option<NaiveDate>,
+}
+
+/// Laid out from the right: delete, restart, the duration, the date and the
+/// stop and start times.
+fn entry_controls(
+    ui: &mut egui::Ui,
+    entry: &model::TimeEntry,
+    buffers: &mut BTreeMap<(EntryId, TimeEndpoint), String>,
+    can_start: bool,
+) -> EntryControls {
+    ui.spacing_mut().item_spacing.x = 6.0;
+    let delete = cross_icon_button(ui);
+    let restart = play_icon_button(ui, can_start);
+    let duration = format_duration(entry.time.duration_seconds().unwrap_or(0));
+    let text_color = ui.visuals().text_color();
+    ui.add_space(4.0);
+    tabular_digits(ui, &duration, semibold_font(15.0), text_color);
+    ui.add_space(4.0);
+    let date = entry_date_picker(ui, entry.id, entry.time);
+    let mut time_edits = Vec::new();
+    time_edits.extend(inline_time_field(
+        ui,
+        buffers,
+        entry.id,
+        TimeEndpoint::Stop,
+        stop_label(entry.time),
+    ));
+    ui.label("–");
+    time_edits.extend(inline_time_field(
+        ui,
+        buffers,
+        entry.id,
+        TimeEndpoint::Start,
+        start_label(entry.time),
+    ));
+    EntryControls {
+        delete,
+        restart,
+        time_edits,
+        date,
+    }
+}
+
+/// An icon button that stays gray until it is hovered, so that a list full
+/// of them does not compete with the entries. Returns the response and the
+/// color to draw the icon in.
+fn quiet_icon_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    accent: Color32,
+) -> (egui::Response, Color32) {
+    let size = egui::vec2(22.0, 22.0);
+    let response = ui.add_enabled(enabled, Button::new("").frame(false).min_size(size));
+    let color = if !enabled {
+        Color32::from_gray(210)
+    } else if response.hovered() {
+        let strength = if response.is_pointer_button_down_on() {
+            0.3
+        } else {
+            0.15
+        };
+        ui.painter()
+            .rect_filled(response.rect, 3.0, accent.gamma_multiply(strength));
+        accent
     } else {
-        Color32::from_gray(145)
+        Color32::from_gray(140)
     };
+    (response, color)
+}
+
+fn play_icon_button(ui: &mut egui::Ui, enabled: bool) -> bool {
+    let (response, color) = quiet_icon_button(ui, enabled, GREEN);
+    let center = response.rect.center();
     ui.painter().add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(center.x - 4.0, center.y - 7.0),
-            egui::pos2(center.x - 4.0, center.y + 7.0),
-            egui::pos2(center.x + 7.0, center.y),
+            egui::pos2(center.x - 3.5, center.y - 5.0),
+            egui::pos2(center.x - 3.5, center.y + 5.0),
+            egui::pos2(center.x + 5.0, center.y),
         ],
-        icon_color,
+        color,
         Stroke::NONE,
     ));
-    response.clicked()
+    response
+        .on_hover_text("Start a timer with this activity and project")
+        .on_disabled_hover_text("Stop the running timer first")
+        .clicked()
 }
 
 fn cross_icon_button(ui: &mut egui::Ui) -> bool {
-    let response = ui
-        .add(
-            Button::new("")
-                .fill(Color32::TRANSPARENT)
-                .stroke(Stroke::NONE)
-                .min_size(egui::vec2(30.0, 26.0)),
-        )
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-    let fill = if response.is_pointer_button_down_on() {
-        Color32::from_rgb(244, 190, 190)
-    } else if response.hovered() {
-        Color32::from_rgb(255, 224, 224)
-    } else {
-        Color32::from_rgb(255, 243, 243)
-    };
-    ui.painter()
-        .rect_filled(response.rect, egui::CornerRadius::same(3), fill);
+    let (response, color) = quiet_icon_button(ui, true, RED);
     let center = response.rect.center();
-    let stroke = Stroke::new(1.8, Color32::from_rgb(198, 65, 65));
-    ui.painter().line_segment(
-        [
-            egui::pos2(center.x - 5.0, center.y - 5.0),
-            egui::pos2(center.x + 5.0, center.y + 5.0),
-        ],
-        stroke,
-    );
-    ui.painter().line_segment(
-        [
-            egui::pos2(center.x + 5.0, center.y - 5.0),
-            egui::pos2(center.x - 5.0, center.y + 5.0),
-        ],
-        stroke,
-    );
-    response.clicked()
+    let stroke = Stroke::new(1.5, color);
+    for slope in [1.0, -1.0] {
+        ui.painter().line_segment(
+            [
+                center + egui::vec2(-4.0, -4.0 * slope),
+                center + egui::vec2(4.0, 4.0 * slope),
+            ],
+            stroke,
+        );
+    }
+    response.on_hover_text("Delete this entry").clicked()
 }
 
 fn project_status_combo(ui: &mut egui::Ui, index: usize, status: &mut ProjectStatus) -> bool {
     let before = *status;
-    bright_combo(ui, |ui| {
-        let popup = ComboBox::from_id_salt(("project-status", index))
-            .selected_text(match status {
-                ProjectStatus::Active => "Active",
-                ProjectStatus::Finished => "Finished",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(status, ProjectStatus::Active, "Active");
-                ui.selectable_value(status, ProjectStatus::Finished, "Finished");
-            });
-        popup
-            .response
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-    });
+    ComboBox::from_id_salt(("project-status", index))
+        .width(84.0)
+        .selected_text(match status {
+            ProjectStatus::Active => "Active",
+            ProjectStatus::Finished => "Finished",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(status, ProjectStatus::Active, "Active");
+            ui.selectable_value(status, ProjectStatus::Finished, "Finished");
+        })
+        .response
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     *status != before
 }
 
-fn stat_label(ui: &mut egui::Ui, label: &str, value: String) {
-    ui.label(
-        RichText::new(format!("{label}: {value}"))
-            .small()
-            .color(Color32::from_gray(100)),
-    );
+/// The names behind the colors of the calendar, ordered by how much of the
+/// given days they account for.
+fn legend_items<'a, K: Ord + Copy + 'a>(
+    totals: impl Iterator<Item = (&'a K, &'a u64)>,
+    describe: impl Fn(K) -> Option<(Swatch, String)>,
+) -> Vec<(Swatch, String)> {
+    let mut seconds_by_key: BTreeMap<K, u64> = BTreeMap::new();
+    for (&key, &seconds) in totals {
+        *seconds_by_key.entry(key).or_default() += seconds;
+    }
+    let mut ranked: Vec<_> = seconds_by_key
+        .into_iter()
+        .filter(|(_, seconds)| *seconds > 0)
+        .collect();
+    ranked.sort_by_key(|(_, seconds)| std::cmp::Reverse(*seconds));
+    ranked
+        .into_iter()
+        .filter_map(|(key, _)| describe(key))
+        .collect()
+}
+
+/// Explains the calendar's colors in a line below it, within the width of
+/// its cells.
+fn calendar_legend(
+    ui: &mut egui::Ui,
+    cells_x: egui::Rangef,
+    mode: CalendarMode,
+    items: &[(Swatch, String)],
+) {
+    let font = FontId::proportional(11.0);
+    let text_color = Color32::from_rgb(87, 96, 106);
+    let caption = |text: &str| {
+        RichText::new(text.to_owned())
+            .font(font.clone())
+            .color(text_color)
+    };
+    let top = ui.cursor().top();
+    let area = egui::Rect::from_x_y_ranges(cells_x, top..=top + Swatch::SIZE + 4.0);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+        if mode == CalendarMode::Time {
+            // Laid out from the right; it reads "0h ... 8h" and then the
+            // color for longer days.
+            right_aligned(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                let step = |ui: &mut egui::Ui, value: f32, meaning: &str| {
+                    let (rect, response) = ui
+                        .allocate_exact_size(egui::Vec2::splat(Swatch::SIZE), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, heat_color(value));
+                    response.on_hover_text(meaning);
+                };
+                ui.label(caption("more than 8h"));
+                step(ui, 1.5, "More than 8 hours");
+                ui.add_space(8.0);
+                ui.label(caption("8h"));
+                step(ui, 0.9, "6 to 8 hours");
+                step(ui, 0.6, "4 to 6 hours");
+                step(ui, 0.3, "2 to 4 hours");
+                step(ui, 0.1, "Less than 2 hours");
+                step(ui, 0.0, "No time tracked");
+                ui.label(caption("0h"));
+            });
+        } else {
+            let text_offset = Swatch::SIZE + 4.0;
+            let text_width = (ui.available_width() - text_offset).max(0.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                for (swatch, name) in items.iter().take(LEGEND_ITEMS) {
+                    // Each entry is a single widget, so that a line break
+                    // never separates a swatch from its name.
+                    let mut job = egui::text::LayoutJob::simple_singleline(
+                        name.clone(),
+                        font.clone(),
+                        text_color,
+                    );
+                    job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
+                    let galley = ui.painter().layout_job(job);
+                    let size = egui::vec2(
+                        text_offset + galley.size().x,
+                        galley.size().y.max(Swatch::SIZE),
+                    );
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    let swatch_rect = egui::Rect::from_center_size(
+                        egui::pos2(rect.left() + Swatch::SIZE * 0.5, rect.center().y),
+                        egui::Vec2::splat(Swatch::SIZE),
+                    );
+                    swatch.paint(ui.painter(), swatch_rect);
+                    let text_top = rect.center().y - galley.size().y * 0.5;
+                    ui.painter().galley(
+                        egui::pos2(rect.left() + text_offset, text_top),
+                        galley,
+                        text_color,
+                    );
+                }
+                if items.len() > LEGEND_ITEMS {
+                    ui.label(caption(&format!("+{} more", items.len() - LEGEND_ITEMS)));
+                }
+            });
+        }
+    });
+}
+
+/// The Projects and Activities tables share their statistics columns, which
+/// follow the `leading` ones.
+fn usage_table(
+    ui: &mut egui::Ui,
+    id: &str,
+    leading: &[&str],
+    related: &str,
+    rows: impl FnOnce(&mut egui::Ui),
+) {
+    let heading = |text: &str| RichText::new(text.to_owned()).weak();
+    ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Unlike the other cards this one hugs its table, so that the
+            // row stripes reach its edges in a wide window.
+            card_frame().inner_margin(10.0).show(ui, |ui| {
+                egui::Grid::new(id)
+                    .spacing([12.0, 6.0])
+                    .min_col_width(0.0)
+                    .with_row_color(|row, _| (row > 0 && row % 2 == 0).then_some(STRIPE))
+                    .show(ui, |ui| {
+                        for title in leading {
+                            ui.label(heading(title));
+                        }
+                        number_cell(ui, heading("Total"));
+                        ui.label("");
+                        for title in ["Entries", "Active days", "First used", "Last used", related]
+                        {
+                            number_cell(ui, heading(title));
+                        }
+                        ui.end_row();
+                        rows(ui);
+                    });
+            });
+        });
+}
+
+fn usage_cells(ui: &mut egui::Ui, stats: &UsageStats, largest_total: u64, bar: Color32) {
+    number_cell(ui, format_stat_duration(stats.total_seconds));
+    let share = if largest_total == 0 {
+        0.0
+    } else {
+        stats.total_seconds as f32 / largest_total as f32
+    };
+    share_bar(ui, share, bar);
+    number_cell(ui, stats.entries.to_string());
+    number_cell(ui, stats.active_days.to_string());
+    number_cell(ui, format_stat_date(stats.first_used));
+    number_cell(ui, format_stat_date(stats.last_used));
+    number_cell(ui, stats.related_count.to_string());
+}
+
+fn largest_total(stats: &[UsageStats]) -> u64 {
+    stats
+        .iter()
+        .map(|stats| stats.total_seconds)
+        .max()
+        .unwrap_or(0)
+}
+
+fn number_cell(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
+    right_aligned(ui, |ui| {
+        ui.label(text);
+    });
+}
+
+/// A bar that makes the totals in a column comparable at a glance.
+fn share_bar(ui: &mut egui::Ui, share: f32, color: Color32) {
+    let (track, _) = ui.allocate_exact_size(egui::vec2(56.0, 6.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(track, 3.0, Color32::from_gray(235));
+    if share > 0.0 {
+        let mut bar = track;
+        bar.set_width((track.width() * share).max(2.0));
+        ui.painter().rect_filled(bar, 3.0, color);
+    }
+}
+
+fn color_cell(ui: &mut egui::Ui, value: &mut RgbColor) -> bool {
+    let mut rgb = [value.red, value.green, value.blue];
+    let changed = ui
+        .color_edit_button_srgb(&mut rgb)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .changed();
+    if changed {
+        *value = RgbColor {
+            red: rgb[0],
+            green: rgb[1],
+            blue: rgb[2],
+        };
+    }
+    changed
 }
 
 fn format_stat_date(timestamp: Option<i64>) -> String {
@@ -1956,7 +2414,7 @@ fn inline_time_field(
     let response = ui.add(
         egui::TextEdit::singleline(text)
             .id_salt(("inline-time", entry_id, endpoint))
-            .desired_width(52.0)
+            .desired_width(TIME_FIELD_WIDTH)
             .horizontal_align(Align::Center),
     );
     if response.lost_focus() && *text != label {
