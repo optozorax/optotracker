@@ -2026,7 +2026,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "opto-tracker"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "atomic-write-file",
  "chrono",
@@ -2034,6 +2034,7 @@ dependencies = [
  "eframe",
  "open",
  "raw-window-handle",
+ "ron",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

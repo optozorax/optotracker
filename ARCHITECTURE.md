@@ -20,10 +20,11 @@ rules to maintain.
 - `reports.rs` contains read-only, full-scan calculations over a model snapshot.
   It does not cache results or mutate the store.
 - `github_activity.rs` is a reusable egui calendar heatmap. The caller supplies
-  cell fills and tooltip contents, so it does not know about trackers, projects,
-  activities, or persistence.
+  cell fills, tooltip contents and the names on its axes, so it does not know
+  about trackers, projects, activities, persistence, or languages.
 - `date_picker.rs` is a reusable egui/chrono date-picker widget. It owns only
-  transient popup state and edits a caller-owned local date.
+  transient popup state and edits a caller-owned local date. Its words come
+  from the caller too.
 - `pagination.rs` is reusable offset-based pagination. Its starting position
   may be any item rather than only a page-size boundary.
 - `theme.rs` holds the colors of the interface as one palette for the light
@@ -31,6 +32,12 @@ rules to maintain.
   the setting or from the system; code that paints with its own colors asks
   for the palette of the visuals it is drawn with. The reusable widgets do
   not use it and choose between their own light and dark colors.
+- `i18n.rs` holds every text of the interface in English and in Russian: a
+  table with one line per text, and methods for the texts that are built
+  around a number, a name or a date. The language is chosen in Settings and
+  kept for the whole process, so code that shows a text asks `tr()` for it.
+  The model, the storage and the calendar policy stay free of languages: they
+  report errors as values, and `i18n.rs` puts those into words.
 - `paths.rs` resolves application paths once. `desktop.rs`, `tray.rs`,
   `single_instance.rs`, and the taskbar functions in `app_icon.rs` are the only
   places that contain desktop or operating-system integration.

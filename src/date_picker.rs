@@ -1,7 +1,8 @@
 //! Small self-contained egui date picker.
 //!
 //! The widget owns only transient UI state and edits a caller-owned
-//! `NaiveDate`. It has no knowledge of tracker entries or persistence.
+//! `NaiveDate`. It has no knowledge of tracker entries or persistence, and
+//! the caller supplies its words, so it is not tied to a language either.
 
 use std::{fmt::Debug, hash::Hash, ops::RangeInclusive};
 
@@ -21,17 +22,35 @@ struct PickerState {
     draft: NaiveDate,
 }
 
+/// The words on the picker.
+#[derive(Clone, Copy)]
+pub struct Labels {
+    /// The names that stand next to the year, from January.
+    pub months: [&'static str; 12],
+    /// The headings of the columns, from Monday.
+    pub weekdays: [&'static str; 7],
+    pub previous_year: &'static str,
+    pub previous_month: &'static str,
+    pub next_month: &'static str,
+    pub next_year: &'static str,
+    pub today: &'static str,
+    pub save: &'static str,
+    pub cancel: &'static str,
+}
+
 pub struct DatePickerButton<'a> {
     selection: &'a mut NaiveDate,
     id_salt: Id,
+    labels: Labels,
     year_range: RangeInclusive<i32>,
 }
 
 impl<'a> DatePickerButton<'a> {
-    pub fn new(selection: &'a mut NaiveDate, id_salt: impl Hash + Debug) -> Self {
+    pub fn new(selection: &'a mut NaiveDate, id_salt: impl Hash + Debug, labels: Labels) -> Self {
         Self {
             selection,
             id_salt: Id::new(id_salt),
+            labels,
             year_range: NaiveDate::MIN.year()..=NaiveDate::MAX.year(),
         }
     }
@@ -104,6 +123,7 @@ impl Widget for DatePickerButton<'_> {
                             DatePickerPopup {
                                 draft: &mut state.draft,
                                 id,
+                                labels: &self.labels,
                                 year_range: &self.year_range,
                             }
                             .draw(ui)
@@ -145,11 +165,13 @@ enum PopupAction {
 struct DatePickerPopup<'a> {
     draft: &'a mut NaiveDate,
     id: Id,
+    labels: &'a Labels,
     year_range: &'a RangeInclusive<i32>,
 }
 
 impl DatePickerPopup<'_> {
     fn draw(&mut self, ui: &mut Ui) -> PopupAction {
+        let labels = self.labels;
         let mut action = PopupAction::None;
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         // The weekday names, the days of the neighboring months and the
@@ -174,7 +196,7 @@ impl DatePickerPopup<'_> {
                 ui,
                 self.year_range.contains(&previous_year.year()),
                 "«",
-                "Previous year",
+                labels.previous_year,
             ) {
                 *self.draft = previous_year;
             }
@@ -183,7 +205,7 @@ impl DatePickerPopup<'_> {
                 ui,
                 self.year_range.contains(&previous_month.year()),
                 "‹",
-                "Previous month",
+                labels.previous_month,
             ) {
                 *self.draft = previous_month;
             }
@@ -191,7 +213,9 @@ impl DatePickerPopup<'_> {
                 egui::vec2(156.0, 26.0),
                 Layout::centered_and_justified(egui::Direction::TopDown),
                 |ui| {
-                    ui.label(RichText::new(self.draft.format("%b %Y").to_string()).strong());
+                    let month = labels.months[self.draft.month0() as usize];
+                    let title = format!("{month} {}", self.draft.year());
+                    ui.label(RichText::new(title).strong());
                 },
             );
             let next_month = shift_month(*self.draft, 1);
@@ -199,7 +223,7 @@ impl DatePickerPopup<'_> {
                 ui,
                 self.year_range.contains(&next_month.year()),
                 "›",
-                "Next month",
+                labels.next_month,
             ) {
                 *self.draft = next_month;
             }
@@ -208,7 +232,7 @@ impl DatePickerPopup<'_> {
                 ui,
                 self.year_range.contains(&next_year.year()),
                 "»",
-                "Next year",
+                labels.next_year,
             ) {
                 *self.draft = next_year;
             }
@@ -219,7 +243,7 @@ impl DatePickerPopup<'_> {
             .num_columns(7)
             .spacing(egui::vec2(4.0, 3.0))
             .show(ui, |ui| {
-                for weekday in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
+                for weekday in labels.weekdays {
                     ui.allocate_ui_with_layout(
                         egui::vec2(36.0, 20.0),
                         Layout::centered_and_justified(egui::Direction::TopDown),
@@ -294,17 +318,17 @@ impl DatePickerPopup<'_> {
             if ui
                 .add_enabled(
                     self.year_range.contains(&today.year()),
-                    Button::new("Today"),
+                    Button::new(labels.today),
                 )
                 .clicked()
             {
                 *self.draft = Local::now().date_naive();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Save").clicked() {
+                if ui.button(labels.save).clicked() {
                     action = PopupAction::Save;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(labels.cancel).clicked() {
                     action = PopupAction::Cancel;
                 }
             });

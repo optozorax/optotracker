@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDate};
@@ -15,6 +15,7 @@ mod app_icon;
 mod date_picker;
 mod desktop;
 mod github_activity;
+mod i18n;
 mod local_time;
 mod model;
 mod pagination;
@@ -30,6 +31,7 @@ use date_picker::DatePickerButton;
 use github_activity::{
     heat_color, CalendarHeatmap, CellFill, Segment, SelectionChange as CalendarSelectionChange,
 };
+use i18n::{tr, Language};
 use local_time::{datetime as local_datetime, TimeEndpoint};
 
 use model::{
@@ -67,8 +69,15 @@ const FULL_DAY_SECONDS: f32 = 8.0 * 60.0 * 60.0;
 const NO_PROJECT_COLOR: Color32 = Color32::from_gray(125);
 const ENTRIES_PER_PAGE: usize = 100;
 const UI_SELECTIONS_MEMORY_ID: &str = "opto_tracker_ui_selections_v1";
+const SETTINGS_KEY: &str = "opto_tracker_settings";
 
 fn main() -> eframe::Result {
+    let app_paths = AppPaths::discover();
+    // First of all, so that whatever is said below is said in the language
+    // of the last run.
+    if let Ok(paths) = &app_paths {
+        i18n::set_language(remembered_language(&paths.persistence));
+    }
     let _instance_guard = match single_instance::SingleInstanceGuard::acquire() {
         Ok(Some(guard)) => guard,
         Ok(None) => {
@@ -90,13 +99,11 @@ fn main() -> eframe::Result {
         } else if store_path.is_none() {
             store_path = Some(PathBuf::from(argument));
         } else {
-            single_instance::SingleInstanceGuard::show_error_message(
-                "Usage: OptoTracker.exe [--minimized] [DATA_FILE]",
-            );
+            single_instance::SingleInstanceGuard::show_error_message(tr().usage);
             return Ok(());
         }
     }
-    let app_paths = match AppPaths::discover() {
+    let app_paths = match app_paths {
         Ok(paths) => paths,
         Err(error) => {
             single_instance::SingleInstanceGuard::show_error_message(&error);
@@ -108,7 +115,7 @@ fn main() -> eframe::Result {
     let store = match repository.load() {
         Ok(store) => store,
         Err(error) => {
-            single_instance::SingleInstanceGuard::show_error_message(&error.to_string());
+            single_instance::SingleInstanceGuard::show_error_message(&tr().load_error(&error));
             return Ok(());
         }
     };
@@ -138,6 +145,20 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+/// The language that an earlier run was left in. What is said before the
+/// window exists is said in it: eframe hands the settings over only once the
+/// window is there, so they are read here from the file it keeps them in, a
+/// RON map of values that are RON themselves.
+fn remembered_language(persistence: &Path) -> Language {
+    let read = || {
+        let file = fs::read_to_string(persistence).ok()?;
+        let values: BTreeMap<String, String> = ron::from_str(&file).ok()?;
+        let settings: PersistedSettings = ron::from_str(values.get(SETTINGS_KEY)?).ok()?;
+        Some(settings.language)
+    };
+    read().unwrap_or_default()
 }
 
 fn configure_style(ctx: &egui::Context) {
@@ -321,6 +342,7 @@ struct PersistedSettings {
     close_or_minimize_to_tray: bool,
     start_minimized_on_autorun: bool,
     theme: egui::ThemePreference,
+    language: Language,
 }
 
 impl Default for PersistedSettings {
@@ -329,6 +351,7 @@ impl Default for PersistedSettings {
             close_or_minimize_to_tray: true,
             start_minimized_on_autorun: true,
             theme: egui::ThemePreference::System,
+            language: Language::default(),
         }
     }
 }
@@ -418,18 +441,20 @@ impl TimeTrackerApp {
             })
             .map(|selections| selections.validated_for(&store))
             .unwrap_or_else(|| RememberedSelections::defaults_for(&store));
+        let preferences: PersistedSettings = storage
+            .and_then(|storage| eframe::get_value(storage, SETTINGS_KEY))
+            .unwrap_or_default();
+        ctx.set_theme(preferences.theme);
+        // Before anything is worded, the menu of the tray icon included.
+        i18n::set_language(preferences.language);
         let running = store.active_entry.is_some();
         let tray = tray::TrayController::new(running, {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         });
-        let preferences: PersistedSettings = storage
-            .and_then(|storage| eframe::get_value(storage, "opto_tracker_settings"))
-            .unwrap_or_default();
-        ctx.set_theme(preferences.theme);
         let message = match &tray {
             Ok(_) => String::new(),
-            Err(error) => format!("Could not create tray icon: {error}"),
+            Err(error) => format!("{}: {error}", tr().tray_not_created),
         };
         let tray = tray.ok();
         let window_hidden = start_minimized && tray.is_some();
@@ -475,16 +500,19 @@ impl TimeTrackerApp {
         match self.repository.save(&self.store) {
             Ok(outcome) => {
                 self.last_saved_store = self.store.clone();
-                self.message = outcome
-                    .backup_warning
-                    .map(|warning| format!("Saved; backup warning: {warning}"))
-                    .unwrap_or_else(|| "Saved".to_owned());
+                self.message = match outcome.backup_warning {
+                    Some(warning) => {
+                        let warning = tr().backup_error(&warning);
+                        format!("{}: {warning}", tr().saved_backup_warning)
+                    }
+                    None => tr().saved.to_owned(),
+                };
             }
             Err(error) => {
                 self.store = self.last_saved_store.clone();
                 self.time_edit_buffers.clear();
                 self.active_start_edit = None;
-                self.message = format!("Save failed; change was reverted: {error}");
+                self.message = format!("{}: {}", tr().save_failed, tr().save_error(&error));
             }
         }
     }
@@ -512,7 +540,7 @@ impl TimeTrackerApp {
             .store
             .start_timer(activity, project, UnixSeconds(now()))
         {
-            self.message = error.to_string();
+            self.message = tr().model_error(&error);
             return;
         }
         self.draft_activity = activity;
@@ -528,7 +556,7 @@ impl TimeTrackerApp {
         let outcome = match self.store.stop_timer(UnixSeconds(now())) {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.message = error.to_string();
+                self.message = tr().model_error(&error);
                 return;
             }
         };
@@ -538,7 +566,7 @@ impl TimeTrackerApp {
         self.draft_project = active.project;
         self.save();
         if outcome.capped_at_limit && self.store.active_entry.is_none() {
-            self.message = "Timer stopped at the 24-hour limit".to_owned();
+            self.message = tr().stopped_at_limit.to_owned();
         }
     }
 
@@ -603,11 +631,11 @@ impl TimeTrackerApp {
                 .min_size(egui::vec2(TIMER_BUTTON_WIDTH, TIMER_HEIGHT - 2.0))
         };
         if started_at.is_some() {
-            if ui.add(button("STOP", palette(ui).stop)).clicked() {
+            if ui.add(button(tr().stop, palette(ui).stop)).clicked() {
                 self.stop_timer();
             }
         } else if ui
-            .add_enabled(can_start, button("START", palette(ui).start))
+            .add_enabled(can_start, button(tr().start, palette(ui).start))
             .clicked()
         {
             self.start_timer();
@@ -657,17 +685,18 @@ impl TimeTrackerApp {
                     .desired_width(TIME_FIELD_WIDTH)
                     .horizontal_align(Align::Center),
             )
-            .on_hover_text("Start time (HH:MM); later times count as yesterday");
+            .on_hover_text(tr().start_time_hint);
         let shown = local_datetime(started_at.0).format("%H:%M").to_string();
         let commit = response.lost_focus()
             || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
         if commit && edit.time != shown {
             let current_time = UnixSeconds(now());
             let result = local_time::edit_active_start(started_at, current_time, &edit.time)
+                .map_err(|error| tr().time_error(error))
                 .and_then(|new_start| {
                     self.store
                         .set_timer_start(new_start, current_time)
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| tr().model_error(&error))
                 });
             match result {
                 Ok(()) => {
@@ -700,7 +729,7 @@ impl TimeTrackerApp {
                         let (label, segment_color) = project
                             .and_then(|index| self.store.projects.get(index))
                             .map(|project| (project.name.clone(), shown_color(project.color)))
-                            .unwrap_or_else(|| ("No project".to_owned(), NO_PROJECT_COLOR));
+                            .unwrap_or_else(|| (tr().no_project.to_owned(), NO_PROJECT_COLOR));
                         CalendarContribution {
                             label,
                             detail: format_duration(seconds),
@@ -794,13 +823,17 @@ impl TimeTrackerApp {
                     controls.set_height(ui.spacing().interact_size.y);
                     ui.scope_builder(egui::UiBuilder::new().max_rect(controls), |ui| {
                         ui.horizontal(|ui| {
-                            if ui.button("⏴").on_hover_text("Earlier").clicked() {
+                            // The controls move together to fit a narrow window.
+                            if ui.available_width() < 380.0 {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                            }
+                            if ui.button("⏴").on_hover_text(tr().earlier).clicked() {
                                 self.calendar.scroll_weeks(CALENDAR_PAGE_WEEKS);
                             }
-                            if ui.button("⏵").on_hover_text("Later").clicked() {
+                            if ui.button("⏵").on_hover_text(tr().later).clicked() {
                                 self.calendar.scroll_weeks(-CALENDAR_PAGE_WEEKS);
                             }
-                            if self.calendar.is_scrolled() && ui.button("This year").clicked() {
+                            if self.calendar.is_scrolled() && ui.button(tr().this_year).clicked() {
                                 self.calendar.reset_scroll();
                             }
                             right_aligned(ui, |ui| {
@@ -808,17 +841,17 @@ impl TimeTrackerApp {
                                     ui.selectable_value(
                                         &mut self.calendar_mode,
                                         CalendarMode::Activities,
-                                        "Activities",
+                                        tr().activities,
                                     );
                                     ui.selectable_value(
                                         &mut self.calendar_mode,
                                         CalendarMode::Projects,
-                                        "Projects",
+                                        tr().projects,
                                     );
                                     ui.selectable_value(
                                         &mut self.calendar_mode,
                                         CalendarMode::Time,
-                                        "Time",
+                                        tr().time,
                                     );
                                 });
                             });
@@ -830,6 +863,7 @@ impl TimeTrackerApp {
                         ui,
                         today,
                         self.selected_date,
+                        &tr().calendar(),
                         |date| match calendar_mode {
                             CalendarMode::Time => day_totals
                                 .get(&date)
@@ -851,12 +885,12 @@ impl TimeTrackerApp {
                         },
                         |ui, date| {
                             ui.set_min_width(220.0);
-                            ui.label(local_time::format_date_with_weekday(date));
+                            ui.label(tr().date_with_weekday(date));
                             ui.label(
                                 day_totals
                                     .get(&date)
                                     .map(|day| format_duration(day.seconds))
-                                    .unwrap_or_else(|| "No time tracked".to_owned()),
+                                    .unwrap_or_else(|| tr().no_time_tracked.to_owned()),
                             );
                             if calendar_mode != CalendarMode::Time {
                                 let contributions = match calendar_mode {
@@ -903,7 +937,7 @@ impl TimeTrackerApp {
                                         ),
                                         None => (
                                             Swatch::Project(NO_PROJECT_COLOR),
-                                            "No project".to_owned(),
+                                            tr().no_project.to_owned(),
                                         ),
                                     },
                                 )
@@ -969,7 +1003,7 @@ impl TimeTrackerApp {
                             section_title(ui, &week_title(entry_week, this_week));
                             total_label(
                                 ui,
-                                "Week total:",
+                                tr().week_total,
                                 week_totals.get(&entry_week).copied().unwrap_or(0),
                             );
                         });
@@ -995,7 +1029,7 @@ impl TimeTrackerApp {
                                     ui.label(semibold(day_title(date, today)));
                                     total_label(
                                         ui,
-                                        "Day total:",
+                                        tr().day_total,
                                         day_totals.get(&date).map_or(0, |day| day.seconds),
                                     );
                                 });
@@ -1003,10 +1037,7 @@ impl TimeTrackerApp {
                         if indices.is_empty() {
                             hairline(ui);
                             entry_frame().show(ui, |ui| {
-                                ui.label(
-                                    RichText::new("Time carried over from an overnight entry")
-                                        .weak(),
-                                );
+                                ui.label(RichText::new(tr().overnight_time).weak());
                             });
                         }
                         for index in indices {
@@ -1109,8 +1140,11 @@ impl TimeTrackerApp {
             .store
             .entry(edit.entry_id)
             .cloned()
-            .ok_or_else(|| "The entry no longer exists".to_owned())
-            .and_then(|entry| local_time::edit_time(entry.time, edit.endpoint, &edit.text));
+            .ok_or_else(|| tr().entry_gone.to_owned())
+            .and_then(|entry| {
+                local_time::edit_time(entry.time, edit.endpoint, &edit.text)
+                    .map_err(|error| tr().time_error(error))
+            });
         match result {
             Ok(time) => {
                 if let Some(entry) = self.store.entry_mut(edit.entry_id) {
@@ -1135,8 +1169,10 @@ impl TimeTrackerApp {
             .store
             .entry(edit.entry_id)
             .cloned()
-            .ok_or_else(|| "The entry no longer exists".to_owned())
-            .and_then(|entry| local_time::edit_date(entry.time, edit.date));
+            .ok_or_else(|| tr().entry_gone.to_owned())
+            .and_then(|entry| {
+                local_time::edit_date(entry.time, edit.date).map_err(|error| tr().time_error(error))
+            });
         match result {
             Ok(time) => {
                 if let Some(entry) = self.store.entry_mut(edit.entry_id) {
@@ -1157,20 +1193,20 @@ impl TimeTrackerApp {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_project_name)
-                    .hint_text("New project")
+                    .hint_text(tr().new_project)
                     .desired_width(220.0),
             );
             ui.color_edit_button_srgb(&mut self.new_project_color)
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-            add_clicked = ui.button("Add").clicked();
+            add_clicked = ui.button(tr().add).clicked();
             right_aligned(ui, |ui| {
-                count_label(ui, format!("{} projects", self.store.projects.len()));
+                count_label(ui, tr().project_count(self.store.projects.len()));
             });
         });
         if add_clicked {
             let name = self.new_project_name.trim();
             if name.is_empty() {
-                self.message = "Project name cannot be empty".to_owned();
+                self.message = tr().project_name_empty.to_owned();
             } else {
                 self.store.projects.push(Project {
                     name: name.to_owned(),
@@ -1199,15 +1235,15 @@ impl TimeTrackerApp {
             let table_width = usage_table(
                 ui,
                 "projects",
-                &["", "", "Project", "Status"],
-                "Activities",
+                &["", "", tr().project, tr().status],
+                tr().activities,
                 |ui| {
                     for index in (0..self.store.projects.len()).rev() {
                         let expanded = disclosure_button(
                             ui,
                             egui::Id::new(("project-activities", index)),
                             stats[index].entries > 0,
-                            "activities",
+                            [tr().show_activities_hint, tr().hide_activities_hint],
                         );
                         let project = &mut self.store.projects[index];
                         changed |= color_cell(ui, &mut project.color);
@@ -1269,20 +1305,20 @@ impl TimeTrackerApp {
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_activity_name)
-                    .hint_text("New activity")
+                    .hint_text(tr().new_activity)
                     .desired_width(220.0),
             );
             ui.color_edit_button_srgb(&mut self.new_activity_color)
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-            add_clicked = ui.button("Add").clicked();
+            add_clicked = ui.button(tr().add).clicked();
             right_aligned(ui, |ui| {
-                count_label(ui, format!("{} activities", self.store.activities.len()));
+                count_label(ui, tr().activity_count(self.store.activities.len()));
             });
         });
         if add_clicked {
             let name = self.new_activity_name.trim();
             if name.is_empty() {
-                self.message = "Activity name cannot be empty".to_owned();
+                self.message = tr().activity_name_empty.to_owned();
             } else {
                 self.store.activities.push(Activity {
                     name: name.to_owned(),
@@ -1313,15 +1349,15 @@ impl TimeTrackerApp {
         let all_seconds: u64 = stats.iter().map(|stats| stats.total_seconds).sum();
         let mut changed = false;
         ui.add_space(8.0);
-        let leading = ["", "", "Activity", "Share"];
+        let leading = ["", "", tr().activity, tr().share];
         table_page(ui, |ui| {
-            usage_table(ui, "activities", &leading, "Projects", |ui| {
+            usage_table(ui, "activities", &leading, tr().projects, |ui| {
                 for index in activity_order {
                     let expanded = disclosure_button(
                         ui,
                         egui::Id::new(("activity-projects", index)),
                         stats[index].entries > 0,
-                        "projects",
+                        [tr().show_projects_hint, tr().hide_projects_hint],
                     );
                     let activity = &mut self.store.activities[index];
                     changed |= color_cell(ui, &mut activity.color);
@@ -1351,7 +1387,7 @@ impl TimeTrackerApp {
                                 Some(project) => {
                                     (Swatch::Project(color(project.color)), &*project.name)
                                 }
-                                None => (Swatch::Empty, "No project"),
+                                None => (Swatch::Empty, tr().no_project),
                             };
                             parts.show(ui, swatch, name, usage);
                         }
@@ -1377,15 +1413,25 @@ impl TimeTrackerApp {
         }
 
         card(ui, |ui| {
-            section_title(ui, "Appearance");
+            section_title(ui, tr().appearance);
             ui.add_space(4.0);
+            let language = self.preferences.language;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(tr().language_label);
+                for language in Language::ALL {
+                    ui.radio_value(&mut self.preferences.language, language, language.name());
+                }
+            });
+            if self.preferences.language != language {
+                self.change_language();
+            }
             let before = self.preferences.theme;
             ui.horizontal_wrapped(|ui| {
-                ui.label("Theme:");
+                ui.label(tr().theme_label);
                 for (theme, name) in [
-                    (egui::ThemePreference::System, "Same as Windows"),
-                    (egui::ThemePreference::Light, "Light"),
-                    (egui::ThemePreference::Dark, "Dark"),
+                    (egui::ThemePreference::System, tr().theme_system),
+                    (egui::ThemePreference::Light, tr().theme_light),
+                    (egui::ThemePreference::Dark, tr().theme_dark),
                 ] {
                     ui.radio_value(&mut self.preferences.theme, theme, name);
                 }
@@ -1395,44 +1441,33 @@ impl TimeTrackerApp {
             }
             if self.preferences.theme == egui::ThemePreference::System {
                 let app_mode = match ui.ctx().system_theme() {
-                    Some(egui::Theme::Dark) => "which is dark now",
-                    Some(egui::Theme::Light) => "which is light now",
-                    None => "which could not be read",
+                    Some(egui::Theme::Dark) => tr().follows_dark_windows,
+                    Some(egui::Theme::Light) => tr().follows_light_windows,
+                    None => tr().follows_unknown_windows,
                 };
-                ui.label(
-                    RichText::new(format!(
-                        "Follows the app mode in the color settings of Windows, {app_mode}."
-                    ))
-                    .small()
-                    .color(palette(ui).muted),
-                );
+                ui.label(RichText::new(app_mode).small().color(palette(ui).muted));
             }
         });
 
         ui.add_space(8.0);
         card(ui, |ui| {
-            section_title(ui, "Application folder");
+            section_title(ui, tr().application_folder);
             ui.label(RichText::new(self.app_paths.directory.display().to_string()).monospace());
-            ui.label(
-                RichText::new(
-                    "The installed executable and UI persistence are stored in this folder.",
-                )
-                .color(palette(ui).muted),
-            );
+            ui.label(RichText::new(tr().application_folder_note).color(palette(ui).muted));
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .button(if desktop::is_installed(&self.app_paths) {
-                        "Update installed app"
+                        tr().update_installed
                     } else {
-                        "Install OptoTracker here"
+                        tr().install_here
                     })
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
                     match desktop::install_current_executable(&self.app_paths) {
                         Ok(()) => {
-                            self.settings_message = "OptoTracker was installed.".to_owned();
+                            self.settings_message = tr().installed.to_owned();
                             if self.autorun_enabled {
                                 if let Err(error) = desktop::set_autorun(
                                     &self.app_paths,
@@ -1447,7 +1482,7 @@ impl TimeTrackerApp {
                     }
                 }
                 if ui
-                    .button("Open folder")
+                    .button(tr().open_folder)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
@@ -1456,13 +1491,13 @@ impl TimeTrackerApp {
                     }
                 }
                 if ui
-                    .button("Create desktop shortcut")
+                    .button(tr().create_shortcut)
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
                     match desktop::create_desktop_shortcut(&self.app_paths) {
                         Ok(()) => {
-                            self.settings_message = "Desktop shortcut created.".to_owned();
+                            self.settings_message = tr().shortcut_created.to_owned();
                         }
                         Err(error) => self.settings_message = error,
                     }
@@ -1471,36 +1506,36 @@ impl TimeTrackerApp {
             ui.add_space(10.0);
             if desktop::is_installed(&self.app_paths) {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Installed executable:");
+                    ui.label(tr().installed_executable);
                     ui.label(RichText::new(paths::EXECUTABLE_FILE).monospace());
                 });
             } else {
-                ui.label("OptoTracker is not installed in this folder yet.");
+                ui.label(tr().not_installed);
             }
             ui.horizontal_wrapped(|ui| {
-                ui.label("Data:");
+                ui.label(tr().data);
                 ui.label(RichText::new(self.repository.path().display().to_string()).monospace());
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label("Persistence:");
+                ui.label(tr().persistence);
                 ui.label(
                     RichText::new(self.app_paths.persistence.display().to_string()).monospace(),
                 );
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label("Weekly backups:");
+                ui.label(tr().weekly_backups);
                 ui.label(RichText::new("backups").monospace());
             });
         });
 
         ui.add_space(8.0);
         card(ui, |ui| {
-            section_title(ui, "Windows behavior");
+            section_title(ui, tr().windows_behavior);
             ui.add_space(4.0);
 
             let mut autorun = self.autorun_enabled;
             if ui
-                .checkbox(&mut autorun, "Start OptoTracker when I sign in")
+                .checkbox(&mut autorun, tr().autorun)
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .changed()
             {
@@ -1519,9 +1554,9 @@ impl TimeTrackerApp {
                     Ok(()) => {
                         self.autorun_enabled = autorun;
                         self.settings_message = if autorun {
-                            "Windows autorun enabled.".to_owned()
+                            tr().autorun_enabled.to_owned()
                         } else {
-                            "Windows autorun disabled".to_owned()
+                            tr().autorun_disabled.to_owned()
                         };
                     }
                     Err(error) => self.settings_message = error,
@@ -1530,7 +1565,7 @@ impl TimeTrackerApp {
             let minimized_changed = ui
                 .checkbox(
                     &mut self.preferences.start_minimized_on_autorun,
-                    "Start minimized to tray on autorun",
+                    tr().autorun_minimized,
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .changed();
@@ -1541,7 +1576,7 @@ impl TimeTrackerApp {
                     self.preferences.start_minimized_on_autorun,
                 ) {
                     Ok(()) => {
-                        self.settings_message = "Autorun behavior updated.".to_owned();
+                        self.settings_message = tr().autorun_updated.to_owned();
                     }
                     Err(error) => self.settings_message = error,
                 }
@@ -1552,18 +1587,30 @@ impl TimeTrackerApp {
                 self.tray.is_some(),
                 egui::Checkbox::new(
                     &mut self.preferences.close_or_minimize_to_tray,
-                    "Send OptoTracker to the tray when closed or minimized",
+                    tr().to_tray,
                 ),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
             ui.label(
-                RichText::new(
-                    "When disabled, minimizing behaves normally and closing exits the app.",
-                )
-                .small()
-                .color(palette(ui).muted),
+                RichText::new(tr().to_tray_note)
+                    .small()
+                    .color(palette(ui).muted),
             );
         });
+    }
+
+    /// Puts the interface into the language that was just chosen.
+    fn change_language(&mut self) {
+        i18n::set_language(self.preferences.language);
+        // These were worded in the language before.
+        self.message.clear();
+        self.settings_message.clear();
+        if let Some(tray) = &self.tray {
+            tray.translate();
+        }
+        // The descriptions of the tray and taskbar icons are written anew
+        // together with the icons.
+        self.last_icon_running = None;
     }
 
     fn handle_window_and_tray(&mut self, ctx: &egui::Context) {
@@ -1630,7 +1677,7 @@ impl eframe::App for TimeTrackerApp {
             app_icon::set_taskbar_running(frame, running);
             if let Some(tray) = &self.tray {
                 if let Err(error) = tray.set_running(running) {
-                    self.message = format!("Could not update tray icon: {error}");
+                    self.message = format!("{}: {error}", tr().tray_not_updated);
                 }
             }
             self.last_icon_running = Some(running);
@@ -1656,11 +1703,16 @@ impl eframe::App for TimeTrackerApp {
                         if ui.available_width() < 440.0 {
                             ui.spacing_mut().item_spacing.x = 2.0;
                         }
-                        ui.selectable_value(&mut self.view, AppView::Entries, "Time entries");
-                        ui.selectable_value(&mut self.view, AppView::Projects, "Projects");
-                        ui.selectable_value(&mut self.view, AppView::Activities, "Activities");
-                        ui.selectable_value(&mut self.view, AppView::Statistics, "Statistics");
-                        ui.selectable_value(&mut self.view, AppView::Settings, "Settings");
+                        let texts = tr();
+                        for (view, name) in [
+                            (AppView::Entries, texts.time_entries),
+                            (AppView::Projects, texts.projects),
+                            (AppView::Activities, texts.activities),
+                            (AppView::Statistics, texts.statistics),
+                            (AppView::Settings, texts.settings),
+                        ] {
+                            ui.selectable_value(&mut self.view, view, name);
+                        }
                     });
                     right_aligned(ui, |ui| {
                         if !self.message.is_empty() {
@@ -1706,7 +1758,7 @@ impl eframe::App for TimeTrackerApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, "opto_tracker_settings", &self.preferences);
+        eframe::set_value(storage, SETTINGS_KEY, &self.preferences);
     }
 
     fn auto_save_interval(&self) -> Duration {
@@ -1724,18 +1776,17 @@ fn pagination_controls(ui: &mut egui::Ui, pagination: &mut Pagination, total_ent
     let last = visible.end;
 
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("{first}–{last} of {total_entries}")).color(palette(ui).muted),
-        );
+        let shown = tr().entries_shown(first, last, total_entries);
+        ui.label(RichText::new(shown).color(palette(ui).muted));
         right_aligned(ui, |ui| {
             if ui
-                .add_enabled(pagination.has_next(total_entries), Button::new("Next"))
+                .add_enabled(pagination.has_next(total_entries), Button::new(tr().next))
                 .clicked()
             {
                 pagination.next(total_entries);
             }
             if ui
-                .add_enabled(pagination.has_previous(), Button::new("Previous"))
+                .add_enabled(pagination.has_previous(), Button::new(tr().previous))
                 .clicked()
             {
                 pagination.previous();
@@ -1810,7 +1861,7 @@ fn activity_selector(
                 RichText::new(&activity.name),
             )
         })
-        .unwrap_or_else(|| (Swatch::Empty, RichText::new("Choose activity").weak()));
+        .unwrap_or_else(|| (Swatch::Empty, RichText::new(tr().choose_activity).weak()));
     let style = match place {
         SelectorPlace::Timer => SelectorStyle::Button,
         SelectorPlace::Entry => SelectorStyle::Quiet,
@@ -1836,7 +1887,7 @@ fn project_selector(
     place: SelectorPlace,
 ) -> bool {
     let before = *value;
-    let no_project = || RichText::new("No project").weak();
+    let no_project = || RichText::new(tr().no_project).weak();
     let current = value.and_then(|id| projects.iter().find(|project| project.id == id));
     let (swatch, text) = current
         .map(|project| (Swatch::Project(project.color), semibold(&project.name)))
@@ -2109,6 +2160,14 @@ fn hairline(ui: &mut egui::Ui) {
     );
 }
 
+/// How wide a text is when it is set in one line.
+fn text_width(ui: &egui::Ui, text: &str, font: &FontId) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x
+}
+
 fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).font(semibold_font(15.0)));
 }
@@ -2226,8 +2285,8 @@ fn play_icon_button(ui: &mut egui::Ui, enabled: bool) -> bool {
         Stroke::NONE,
     ));
     response
-        .on_hover_text("Start a timer with this activity and project")
-        .on_disabled_hover_text("Stop the running timer first")
+        .on_hover_text(tr().restart_hint)
+        .on_disabled_hover_text(tr().stop_first_hint)
         .clicked()
 }
 
@@ -2244,7 +2303,7 @@ fn cross_icon_button(ui: &mut egui::Ui) -> bool {
             stroke,
         );
     }
-    response.on_hover_text("Delete this entry").clicked()
+    response.on_hover_text(tr().delete_entry_hint).clicked()
 }
 
 fn project_status_combo(
@@ -2253,15 +2312,28 @@ fn project_status_combo(
     status: &mut ProjectStatus,
 ) -> egui::Response {
     let before = *status;
+    let choices = [ProjectStatus::Active, ProjectStatus::Finished];
+    let name = |status: ProjectStatus| match status {
+        ProjectStatus::Active => tr().status_active,
+        ProjectStatus::Finished => tr().status_finished,
+    };
+    // Every row gets a box as wide as the longer name needs, with the arrow
+    // and the padding that egui puts around it.
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let name_width = choices
+        .map(|choice| text_width(ui, name(choice), &font))
+        .into_iter()
+        .fold(0.0, f32::max);
+    let spacing = ui.spacing();
+    let width =
+        name_width + spacing.icon_spacing + spacing.icon_width + 2.0 * spacing.button_padding.x;
     let mut response = ComboBox::from_id_salt(("project-status", index))
-        .width(84.0)
-        .selected_text(match status {
-            ProjectStatus::Active => "Active",
-            ProjectStatus::Finished => "Finished",
-        })
+        .width(width.max(84.0))
+        .selected_text(name(*status))
         .show_ui(ui, |ui| {
-            ui.selectable_value(status, ProjectStatus::Active, "Active");
-            ui.selectable_value(status, ProjectStatus::Finished, "Finished");
+            for choice in choices {
+                ui.selectable_value(status, choice, name(choice));
+            }
         })
         .response
         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -2271,10 +2343,16 @@ fn project_status_combo(
     response
 }
 
-/// A triangle that shows or hides the rows below it, which hold the named
-/// `parts` of its own row. Like a collapsing header it keeps its state in
-/// egui's memory. Returns whether the rows are shown.
-fn disclosure_button(ui: &mut egui::Ui, id: egui::Id, enabled: bool, parts: &str) -> bool {
+/// A triangle that shows or hides the rows below it, which hold the parts
+/// of its own row. The hints say what a click does while the rows are
+/// hidden and while they are shown. Like a collapsing header it keeps its
+/// state in egui's memory. Returns whether the rows are shown.
+fn disclosure_button(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    enabled: bool,
+    [show_hint, hide_hint]: [&str; 2],
+) -> bool {
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     let (response, color) = quiet_icon_button(ui, enabled, palette(ui).text);
@@ -2302,9 +2380,9 @@ fn disclosure_button(ui: &mut egui::Ui, id: egui::Id, enabled: bool, parts: &str
         Stroke::NONE,
     ));
     response.on_hover_text(if state.is_open() {
-        format!("Hide its {parts}")
+        hide_hint
     } else {
-        format!("Show the time of its {parts}")
+        show_hint
     });
     enabled && state.is_open()
 }
@@ -2415,16 +2493,17 @@ fn calendar_legend(
                     ui.painter().rect_filled(rect, 2.0, color);
                     response.on_hover_text(meaning);
                 };
-                ui.label(caption("more than 8h"));
-                step(ui, 1.5, "More than 8 hours");
+                let texts = tr();
+                ui.label(caption(texts.legend_more));
+                step(ui, 1.5, texts.more_than_8_hours);
                 ui.add_space(8.0);
-                ui.label(caption("8h"));
-                step(ui, 0.9, "6 to 8 hours");
-                step(ui, 0.6, "4 to 6 hours");
-                step(ui, 0.3, "2 to 4 hours");
-                step(ui, 0.1, "Less than 2 hours");
-                step(ui, 0.0, "No time tracked");
-                ui.label(caption("0h"));
+                ui.label(caption(texts.legend_full_day));
+                step(ui, 0.9, texts.from_6_to_8_hours);
+                step(ui, 0.6, texts.from_4_to_6_hours);
+                step(ui, 0.3, texts.from_2_to_4_hours);
+                step(ui, 0.1, texts.less_than_2_hours);
+                step(ui, 0.0, texts.no_time_tracked);
+                ui.label(caption(texts.legend_nothing));
             });
         } else {
             swatch_legend(ui, items);
@@ -2466,7 +2545,7 @@ fn swatch_legend(ui: &mut egui::Ui, items: &[(Swatch, String)]) {
             );
         }
         if items.len() > LEGEND_ITEMS {
-            let more = format!("+{} more", items.len() - LEGEND_ITEMS);
+            let more = tr().more(items.len() - LEGEND_ITEMS);
             ui.label(RichText::new(more).font(font).color(caption));
         }
     });
@@ -2495,9 +2574,16 @@ fn usage_table(
                 for title in leading {
                     ui.label(heading(title));
                 }
-                number_cell(ui, heading("Total"));
+                let texts = tr();
+                number_cell(ui, heading(texts.total));
                 ui.label("");
-                for title in ["Entries", "Active days", "First used", "Last used", related] {
+                for title in [
+                    texts.entries,
+                    texts.active_days,
+                    texts.first_used,
+                    texts.last_used,
+                    related,
+                ] {
                     number_cell(ui, heading(title));
                 }
                 ui.end_row();
@@ -2575,27 +2661,27 @@ fn color_cell(ui: &mut egui::Ui, value: &mut RgbColor) -> bool {
 
 fn format_stat_date(timestamp: Option<i64>) -> String {
     timestamp
-        .map(|value| local_time::format_date(local_datetime(value).date_naive()))
+        .map(|value| tr().date(local_datetime(value).date_naive()))
         .unwrap_or_else(|| "-".to_owned())
 }
 
 fn week_title(week: NaiveDate, this_week: NaiveDate) -> String {
     if week == this_week {
-        "This week".to_owned()
+        tr().this_week.to_owned()
     } else if week == this_week - ChronoDuration::weeks(1) {
-        "Last week".to_owned()
+        tr().last_week.to_owned()
     } else {
-        format!("Week of {}", local_time::format_date(week))
+        tr().week_of(week)
     }
 }
 
 fn day_title(date: NaiveDate, today: NaiveDate) -> String {
     if date == today {
-        "Today".to_owned()
+        tr().today.to_owned()
     } else if date == today - ChronoDuration::days(1) {
-        "Yesterday".to_owned()
+        tr().yesterday.to_owned()
     } else {
-        local_time::format_date_with_weekday(date)
+        tr().date_with_weekday(date)
     }
 }
 
@@ -2614,13 +2700,11 @@ fn stop_label(time: TimeRange) -> String {
 fn entry_date_picker(ui: &mut egui::Ui, entry_id: EntryId, time: TimeRange) -> Option<NaiveDate> {
     let original = local_datetime(time.started_at.0).date_naive();
     let mut selected = original;
+    let picker = DatePickerButton::new(&mut selected, ("entry-date", entry_id), tr().date_picker());
     let response = ui
-        .add(DatePickerButton::new(&mut selected, ("entry-date", entry_id)).year_range(2000..=3000))
+        .add(picker.year_range(2000..=3000))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!(
-            "Change date ({})",
-            local_time::format_date(original)
-        ));
+        .on_hover_text(tr().change_date(original));
     response.changed().then_some(selected)
 }
 
@@ -2671,19 +2755,11 @@ fn format_duration(seconds: u64) -> String {
 
 fn format_stat_duration(seconds: u64) -> String {
     if seconds >= 3600 {
-        let hours = seconds / 3600;
-        format!("{hours} {}", if hours == 1 { "hour" } else { "hours" })
+        tr().hour_count(seconds / 3600)
     } else if seconds >= 60 {
-        let minutes = seconds / 60;
-        format!(
-            "{minutes} {}",
-            if minutes == 1 { "minute" } else { "minutes" }
-        )
+        tr().minute_count(seconds / 60)
     } else {
-        format!(
-            "{seconds} {}",
-            if seconds == 1 { "second" } else { "seconds" }
-        )
+        tr().second_count(seconds)
     }
 }
 
@@ -2691,12 +2767,13 @@ fn format_stat_duration(seconds: u64) -> String {
 fn format_hours_minutes(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = seconds % 3600 / 60;
+    let (h, m) = (tr().hours_letter, tr().minutes_letter);
     if hours >= 100 {
-        format!("{hours} h")
+        format!("{hours} {h}")
     } else if hours > 0 {
-        format!("{hours} h {minutes} m")
+        format!("{hours} {h} {minutes} {m}")
     } else {
-        format!("{minutes} m")
+        format!("{minutes} {m}")
     }
 }
 
@@ -2757,6 +2834,41 @@ mod tests {
                 .is_none_or(|project| project.0 < store.projects.len()));
             assert!(entry.time.stopped_at >= entry.time.started_at);
         }
+    }
+
+    #[test]
+    fn the_language_is_read_from_the_settings_that_eframe_keeps() {
+        let directory = std::env::temp_dir().join(format!(
+            "opto-tracker-language-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("temp.ron");
+        let settings = |settings: &str| {
+            let contents = format!(
+                r#"{{
+    "window": "(fullscreen:false,maximized:false)",
+    "{SETTINGS_KEY}": "{settings}",
+}}"#
+            );
+            fs::write(&file, contents).unwrap();
+            remembered_language(&file)
+        };
+
+        assert_eq!(
+            settings("(close_or_minimize_to_tray:true,theme:Light,language:Russian)"),
+            Language::Russian
+        );
+        // Written by a version that had one language.
+        assert_eq!(
+            settings("(close_or_minimize_to_tray:true,theme:Light)"),
+            Language::English
+        );
+        fs::write(&file, "not RON").unwrap();
+        assert_eq!(remembered_language(&file), Language::English);
+        fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(remembered_language(&file), Language::English);
     }
 
     #[test]

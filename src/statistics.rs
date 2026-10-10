@@ -12,6 +12,7 @@ use eframe::egui::{
 };
 
 use crate::date_picker::DatePickerButton;
+use crate::i18n::{tr, Before};
 use crate::local_time;
 use crate::model::{ProjectStatus, Store};
 use crate::reports::{
@@ -22,8 +23,8 @@ use crate::reports::{
 use crate::theme::{data_color, palette};
 use crate::{
     card, color, format_hours_minutes, format_share, frameless_until_hovered, paint_share_bar,
-    right_aligned, row, section_title, semibold_font, swatch_legend, Swatch, NO_PROJECT_COLOR,
-    ROW_HEIGHT, SHARE_BAR_SIZE, SHARE_WIDTH,
+    right_aligned, row, section_title, semibold_font, swatch_legend, text_width, Swatch,
+    NO_PROJECT_COLOR, ROW_HEIGHT, SHARE_BAR_SIZE, SHARE_WIDTH,
 };
 
 const MEMORY_ID: &str = "opto_tracker_statistics_v1";
@@ -43,6 +44,9 @@ const LIST_ROW_HEIGHT: f32 = 20.0;
 const TIME_WIDTH: f32 = 70.0;
 /// The times of the project comparison are set in a wider font.
 const MIX_TIME_WIDTH: f32 = 86.0;
+/// Room for the buttons that move a period and for the days of a week next
+/// to its name, with the space around them.
+const STEPPER_ROOM: f32 = 216.0;
 const MIX_BAR_HEIGHT: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -124,7 +128,7 @@ impl Data<'_> {
                             },
                             None => Part {
                                 swatch: Swatch::Project(NO_PROJECT_COLOR),
-                                name: "No project",
+                                name: tr().no_project,
                                 seconds,
                                 rank: usize::MAX,
                             },
@@ -204,7 +208,7 @@ impl StatisticsView {
         let day_totals = totals_by_local_day(store, now);
         let Some(first_day) = day_totals.keys().next().map(|&first| first.min(today)) else {
             card(ui, |ui| {
-                ui.label(RichText::new("Nothing has been tracked yet.").weak());
+                ui.label(RichText::new(tr().nothing_tracked).weak());
             });
             return;
         };
@@ -306,23 +310,42 @@ impl StatisticsView {
     }
 
     fn period_controls(&mut self, ui: &mut egui::Ui, today: NaiveDate, first_day: NaiveDate) {
+        let texts = tr();
         let spans = [
-            (Span::Week, "Week"),
-            (Span::Month, "Month"),
-            (Span::Year, "Year"),
-            (Span::All, "All time"),
-            (Span::Custom, "Custom"),
+            (Span::Week, texts.week),
+            (Span::Month, texts.month),
+            (Span::Year, texts.year),
+            (Span::All, texts.all_time),
+            (Span::Custom, texts.custom),
         ];
         let shown = self.range(today, first_day);
         let before = self.span;
-        if ui.available_width() >= 560.0 {
+        // The name of the period shares a row with the choice of periods in
+        // a window that is wide enough for both. How wide that is depends on
+        // the language.
+        let spacing = ui.spacing();
+        let button_font = egui::TextStyle::Button.resolve(ui.style());
+        let spans_width: f32 = spans
+            .iter()
+            .map(|(_, name)| text_width(ui, name, &button_font) + 2.0 * spacing.button_padding.x)
+            .sum::<f32>()
+            + (spans.len() - 1) as f32 * spacing.item_spacing.x;
+        let title_width = [texts.this_week, texts.last_week]
+            .map(|title| text_width(ui, title, &semibold_font(15.0)))
+            .into_iter()
+            .fold(0.0, f32::max);
+        if ui.available_width() >= spans_width + title_width + STEPPER_ROOM {
             row(ui, ROW_HEIGHT, |ui| {
-                self.period_stepper(ui, today, first_day);
                 right_aligned(ui, |ui| {
                     frameless_until_hovered(ui, |ui| {
                         for (span, name) in spans.into_iter().rev() {
                             ui.selectable_value(&mut self.span, span, name);
                         }
+                    });
+                    // In the room that is left, so that unusually long days
+                    // are cut short instead of running under the periods.
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        self.period_stepper(ui, today, first_day);
                     });
                 });
             });
@@ -352,47 +375,49 @@ impl StatisticsView {
         let range = self.range(today, first_day);
         let title = |ui: &mut egui::Ui, text: &str| section_title(ui, text);
         let detail = |ui: &mut egui::Ui, text: String| {
-            ui.label(RichText::new(text).weak());
+            ui.add(egui::Label::new(RichText::new(text).weak()).truncate());
         };
         match self.span {
             Span::Week | Span::Month | Span::Year => {
                 let earlier = ui.add_enabled(*range.start() > first_day, Button::new("⏴"));
-                if earlier.on_hover_text("Earlier").clicked() {
+                if earlier.on_hover_text(tr().earlier).clicked() {
                     self.steps_back += 1;
                 }
                 let later = ui.add_enabled(self.steps_back > 0, Button::new("⏵"));
-                if later.on_hover_text("Later").clicked() {
+                if later.on_hover_text(tr().later).clicked() {
                     self.steps_back -= 1;
                 }
                 ui.add_space(4.0);
                 match (self.span, self.steps_back) {
                     (Span::Week, 0) => {
-                        title(ui, "This week");
+                        title(ui, tr().this_week);
                         detail(ui, format_days(&range));
                     }
                     (Span::Week, 1) => {
-                        title(ui, "Last week");
+                        title(ui, tr().last_week);
                         detail(ui, format_days(&range));
                     }
                     (Span::Week, _) => title(ui, &format_days(&range)),
-                    (Span::Month, _) => title(ui, &range.start().format("%B %Y").to_string()),
+                    (Span::Month, _) => title(ui, &tr().month_and_year(*range.start())),
                     _ => title(ui, &range.start().year().to_string()),
                 }
             }
             Span::All => {
-                title(ui, "All time");
+                title(ui, tr().all_time);
                 detail(ui, format_days(&range));
             }
             Span::Custom => {
                 let (mut from, mut to) = (*range.start(), *range.end());
                 let years = first_day.year()..=today.year();
-                ui.label(local_time::format_date(from));
-                let from_picker =
-                    DatePickerButton::new(&mut from, "statistics-from").year_range(years.clone());
+                let labels = tr().date_picker();
+                ui.label(tr().date(from));
+                let from_picker = DatePickerButton::new(&mut from, "statistics-from", labels)
+                    .year_range(years.clone());
                 let from_changed = ui.add(from_picker).changed();
                 ui.label("–");
-                ui.label(local_time::format_date(to));
-                let to_picker = DatePickerButton::new(&mut to, "statistics-to").year_range(years);
+                ui.label(tr().date(to));
+                let to_picker =
+                    DatePickerButton::new(&mut to, "statistics-to", labels).year_range(years);
                 let to_changed = ui.add(to_picker).changed();
                 // Whichever end was moved past the other takes it along.
                 if from_changed && from > to {
@@ -418,10 +443,10 @@ impl StatisticsView {
         let per_worked_day = totals.seconds.checked_div(worked).unwrap_or(0);
         let per_day = totals.seconds.checked_div(days).unwrap_or(0);
         let before = match self.span {
-            Span::Week => "the week before",
-            Span::Month => "the month before",
-            Span::Year => "the year before",
-            Span::All | Span::Custom => "the days before",
+            Span::Week => Before::Week,
+            Span::Month => Before::Month,
+            Span::Year => Before::Year,
+            Span::All | Span::Custom => Before::Days,
         };
         let (change, change_hint) = self
             .earlier_range(range, data.today)
@@ -429,20 +454,15 @@ impl StatisticsView {
                 let earlier_seconds = range_totals(data.day_totals, &earlier).seconds;
                 let change = match (totals.seconds, earlier_seconds) {
                     (0, 0) => String::new(),
-                    (_, 0) => format!("nothing {before}"),
+                    (_, 0) => tr().nothing_before(before),
                     (seconds, earlier) => {
                         let percent = (seconds as f64 / earlier as f64 - 1.0) * 100.0;
-                        match percent.round() as i64 {
-                            0 => format!("same as {before}"),
-                            percent if percent > 0 => format!("+{percent}% vs {before}"),
-                            percent => format!("−{}% vs {before}", -percent),
-                        }
+                        tr().change_since(percent.round() as i64, before)
                     }
                 };
-                let hint = format!(
-                    "{} in {}",
-                    format_hours_minutes(earlier_seconds),
-                    format_days(&earlier)
+                let hint = tr().time_in_days(
+                    &format_hours_minutes(earlier_seconds),
+                    &format_days(&earlier),
                 );
                 (change, hint)
             })
@@ -450,30 +470,30 @@ impl StatisticsView {
         let busiest = busiest_day(data.day_totals, range);
         vec![
             Tile {
-                caption: "Tracked",
+                caption: tr().tracked,
                 value: format_hours_minutes(totals.seconds),
                 note: change,
                 hint: change_hint,
             },
             Tile {
-                caption: "Days worked",
+                caption: tr().days_worked,
                 value: worked.to_string(),
-                note: format!("of {days} {}", if days == 1 { "day" } else { "days" }),
+                note: tr().of_days(days),
                 hint: String::new(),
             },
             Tile {
-                caption: "Per worked day",
+                caption: tr().per_worked_day,
                 value: format_hours_minutes(per_worked_day),
-                note: format!("{} over all days", format_hours_minutes(per_day)),
+                note: tr().over_all_days(&format_hours_minutes(per_day)),
                 hint: String::new(),
             },
             Tile {
-                caption: "Busiest day",
+                caption: tr().busiest_day,
                 value: busiest
                     .map(|(_, seconds)| format_hours_minutes(seconds))
                     .unwrap_or_else(|| "–".to_owned()),
                 note: busiest
-                    .map(|(date, _)| date.format("%a, %-d %b %Y").to_string())
+                    .map(|(date, _)| tr().date_with_short_weekday(date))
                     .unwrap_or_default(),
                 hint: String::new(),
             },
@@ -496,15 +516,15 @@ impl StatisticsView {
                 section_title(
                     ui,
                     match size {
-                        BucketSize::Day => "Time per day",
-                        BucketSize::Week => "Time per week",
-                        BucketSize::Month => "Time per month",
+                        BucketSize::Day => tr().time_per_day,
+                        BucketSize::Week => tr().time_per_week,
+                        BucketSize::Month => tr().time_per_month,
                     },
                 );
                 right_aligned(ui, |ui| {
                     frameless_until_hovered(ui, |ui| {
-                        ui.selectable_value(&mut self.split, Split::Projects, "Projects");
-                        ui.selectable_value(&mut self.split, Split::Activities, "Activities");
+                        ui.selectable_value(&mut self.split, Split::Projects, tr().projects);
+                        ui.selectable_value(&mut self.split, Split::Activities, tr().activities);
                     });
                 });
             });
@@ -550,15 +570,21 @@ impl StatisticsView {
         let activities = data.parts(Split::Activities, totals);
         let projects = data.parts(Split::Projects, totals);
         let [all_activities, all_projects] = &mut self.full_lists;
+        let texts = tr();
         if ui.available_width() >= 760.0 {
             ui.columns(2, |columns| {
-                parts_list(&mut columns[0], "Activities", &activities, all_activities);
-                parts_list(&mut columns[1], "Projects", &projects, all_projects);
+                parts_list(
+                    &mut columns[0],
+                    texts.activities,
+                    &activities,
+                    all_activities,
+                );
+                parts_list(&mut columns[1], texts.projects, &projects, all_projects);
             });
         } else {
-            parts_list(ui, "Activities", &activities, all_activities);
+            parts_list(ui, texts.activities, &activities, all_activities);
             ui.add_space(8.0);
-            parts_list(ui, "Projects", &projects, all_projects);
+            parts_list(ui, texts.projects, &projects, all_projects);
         }
     }
 }
@@ -657,12 +683,16 @@ fn bucket_label(size: BucketSize, buckets: &[Bucket], index: usize) -> Option<Ax
         return strong(day.year().to_string());
     }
     match size {
-        BucketSize::Day if buckets.len() <= 7 => plain(day.format("%a").to_string()),
-        BucketSize::Day if new_month && previous.is_some() => strong(day.format("%b").to_string()),
+        BucketSize::Day if buckets.len() <= 7 => plain(tr().short_weekday(day).to_owned()),
+        BucketSize::Day if new_month && previous.is_some() => {
+            strong(tr().short_month(day).to_owned())
+        }
         BucketSize::Day if buckets.len() <= 16 || day.day() == 1 || day.day().is_multiple_of(5) => {
             plain(day.day().to_string())
         }
-        BucketSize::Week | BucketSize::Month if new_month => plain(day.format("%b").to_string()),
+        BucketSize::Week | BucketSize::Month if new_month => {
+            plain(tr().short_month(day).to_owned())
+        }
         _ => None,
     }
 }
@@ -671,8 +701,8 @@ fn bucket_title(size: BucketSize, bucket: &Bucket) -> String {
     let whole_month =
         bucket.first == month_start(bucket.first) && bucket.last == month_end(bucket.first);
     match size {
-        BucketSize::Day => local_time::format_date_with_weekday(bucket.first),
-        BucketSize::Month if whole_month => bucket.first.format("%B %Y").to_string(),
+        BucketSize::Day => tr().date_with_weekday(bucket.first),
+        BucketSize::Month if whole_month => tr().month_and_year(bucket.first),
         BucketSize::Week | BucketSize::Month => format_days(&(bucket.first..=bucket.last)),
     }
 }
@@ -680,20 +710,20 @@ fn bucket_title(size: BucketSize, bucket: &Bucket) -> String {
 /// A range of days without repeating the month or year that its ends share.
 fn format_days(range: &RangeInclusive<NaiveDate>) -> String {
     let (first, last) = (*range.start(), *range.end());
-    let last_text = local_time::format_date(last);
+    let last_text = tr().date(last);
     if first == last {
         last_text
     } else if (first.year(), first.month()) == (last.year(), last.month()) {
         format!("{} – {last_text}", first.day())
     } else if first.year() == last.year() {
-        format!("{} – {last_text}", first.format("%-d %b"))
+        format!("{} – {last_text}", tr().day_and_month(first))
     } else {
-        format!("{} – {last_text}", local_time::format_date(first))
+        format!("{} – {last_text}", tr().date(first))
     }
 }
 
 fn format_day_count(days: u32) -> String {
-    format!("{days} {}", if days == 1 { "day" } else { "days" })
+    tr().day_count(u64::from(days))
 }
 
 /// A number with a caption above it and a remark below it.
@@ -706,11 +736,23 @@ struct Tile {
     hint: String,
 }
 
-/// Lays tiles out in a row, or in two rows of a narrow window.
+/// Lays tiles out in a row, or in two rows where a window is narrow or a
+/// quarter of it is too little for one of the texts.
 fn tiles(ui: &mut egui::Ui, tiles: &[Tile]) {
-    let per_row = if ui.available_width() >= 560.0 { 4 } else { 2 };
     let caption_font = FontId::proportional(11.0);
     let value_font = semibold_font(18.0);
+    let quarter = (ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 4.0;
+    let fits = |text: &str, font: &FontId| text_width(ui, text, font) <= quarter;
+    let all_fit = tiles.iter().all(|tile| {
+        fits(tile.caption, &caption_font)
+            && fits(&tile.value, &value_font)
+            && fits(&tile.note, &caption_font)
+    });
+    let per_row = if ui.available_width() >= 560.0 && all_fit {
+        4
+    } else {
+        2
+    };
     let (caption_height, value_height) = ui.fonts_mut(|fonts| {
         (
             fonts.row_height(&caption_font),
@@ -822,9 +864,9 @@ fn axis_text(seconds: u64) -> String {
     if seconds == 0 {
         "0".to_owned()
     } else if seconds.is_multiple_of(3600) {
-        format!("{}h", seconds / 3600)
+        format!("{}{}", seconds / 3600, tr().hours_letter)
     } else {
-        format!("{}m", seconds / 60)
+        format!("{}{}", seconds / 60, tr().minutes_letter)
     }
 }
 
@@ -978,7 +1020,7 @@ fn parts_tooltip(ui: &mut egui::Ui, heading: &str, seconds: u64, parts: &[Part<'
     ui.set_width(TOOLTIP_WIDTH);
     ui.label(heading);
     if seconds == 0 {
-        ui.label("No time tracked");
+        ui.label(tr().no_time_tracked);
         return;
     }
     ui.label(format_hours_minutes(seconds));
@@ -1001,7 +1043,7 @@ fn parts_tooltip(ui: &mut egui::Ui, heading: &str, seconds: u64, parts: &[Part<'
         });
     }
     if parts.len() > TOOLTIP_PARTS {
-        let more = format!("+{} more", parts.len() - TOOLTIP_PARTS);
+        let more = tr().more(parts.len() - TOOLTIP_PARTS);
         ui.label(RichText::new(more).weak());
     }
 }
@@ -1021,9 +1063,9 @@ fn parts_list(ui: &mut egui::Ui, title: &str, parts: &[Part<'_>], show_all: &mut
         if parts.len() > LIST_ROWS {
             ui.add_space(4.0);
             let text = if *show_all {
-                "Show fewer".to_owned()
+                tr().show_fewer.to_owned()
             } else {
-                format!("Show all {}", parts.len())
+                tr().show_all(parts.len())
             };
             if ui.link(text).clicked() {
                 *show_all = !*show_all;
@@ -1116,16 +1158,9 @@ fn habits(ui: &mut egui::Ui, data: &Data<'_>, range: &RangeInclusive<NaiveDate>)
     };
 
     let weekday_chart = |ui: &mut egui::Ui| {
-        caption(ui, "An average day of the week");
-        let names = [
-            "Monday",
-            "Tuesday",
-            "Wednesday",
-            "Thursday",
-            "Friday",
-            "Saturday",
-            "Sunday",
-        ];
+        caption(ui, tr().average_weekday);
+        let names = tr().weekdays();
+        let short_names = tr().short_weekdays();
         let average = |index: usize| {
             let weekday = weekdays[index];
             weekday
@@ -1134,7 +1169,7 @@ fn habits(ui: &mut egui::Ui, data: &Data<'_>, range: &RangeInclusive<NaiveDate>)
                 .unwrap_or(0)
         };
         let bars: Vec<Bar> = (0..7)
-            .map(|index| bar(average(index), Some(names[index][..3].to_owned())))
+            .map(|index| bar(average(index), Some(short_names[index].to_owned())))
             .collect();
         bar_chart(
             ui,
@@ -1145,22 +1180,14 @@ fn habits(ui: &mut egui::Ui, data: &Data<'_>, range: &RangeInclusive<NaiveDate>)
             |ui, index| {
                 let weekday = weekdays[index];
                 ui.label(names[index]);
-                ui.label(format!(
-                    "{} on average",
-                    format_hours_minutes(average(index))
-                ));
-                ui.label(
-                    RichText::new(format!(
-                        "worked on {} of {}",
-                        weekday.worked_days, weekday.days
-                    ))
-                    .weak(),
-                );
+                ui.label(tr().on_average(&format_hours_minutes(average(index))));
+                let worked = tr().worked_on(weekday.worked_days, weekday.days);
+                ui.label(RichText::new(worked).weak());
             },
         );
     };
     let hour_chart = |ui: &mut egui::Ui| {
-        caption(ui, "Time by hour of the day");
+        caption(ui, tr().time_by_hour);
         let bars: Vec<Bar> = (0..24)
             .map(|hour| bar(hours[hour], (hour % 3 == 0).then(|| hour.to_string())))
             .collect();
@@ -1168,12 +1195,12 @@ fn habits(ui: &mut egui::Ui, data: &Data<'_>, range: &RangeInclusive<NaiveDate>)
             ui.label(format!("{hour:02}:00 – {:02}:00", (hour + 1) % 24));
             ui.label(format_hours_minutes(hours[hour]));
             let share = format_share(hours[hour], all_hours);
-            ui.label(RichText::new(format!("{share} of the time")).weak());
+            ui.label(RichText::new(tr().of_the_time(&share)).weak());
         });
     };
 
     card(ui, |ui| {
-        section_title(ui, "Habits");
+        section_title(ui, tr().habits);
         ui.add_space(4.0);
         if ui.available_width() >= 560.0 {
             ui.columns(2, |columns| {
@@ -1187,53 +1214,44 @@ fn habits(ui: &mut egui::Ui, data: &Data<'_>, range: &RangeInclusive<NaiveDate>)
         }
         ui.add_space(10.0);
         let current = current_streak(data.day_totals, data.today);
+        let texts = tr();
         tiles(
             ui,
             &[
                 Tile {
-                    caption: "Typical session",
+                    caption: texts.typical_session,
                     // The one in the middle: half of them are longer.
                     value: sessions
                         .get(sessions.len() / 2)
                         .map(|&seconds| format_hours_minutes(seconds))
                         .unwrap_or_else(|| "–".to_owned()),
-                    note: format!(
-                        "of {} {}",
-                        sessions.len(),
-                        if sessions.len() == 1 {
-                            "session"
-                        } else {
-                            "sessions"
-                        }
-                    ),
-                    hint: "Half of the sessions are longer than this, half are shorter. \
-                           Entries less than five minutes apart are one session."
-                        .to_owned(),
+                    note: texts.of_sessions(sessions.len()),
+                    hint: texts.typical_session_hint.to_owned(),
                 },
                 Tile {
-                    caption: "Longest session",
+                    caption: texts.longest_session,
                     value: sessions
                         .last()
                         .map(|&seconds| format_hours_minutes(seconds))
                         .unwrap_or_else(|| "–".to_owned()),
-                    note: "without a break".to_owned(),
+                    note: texts.without_break.to_owned(),
                     hint: String::new(),
                 },
                 Tile {
-                    caption: "Longest streak",
+                    caption: texts.longest_streak,
                     value: format_day_count(streak.map_or(0, |(_, days)| days)),
                     note: streak
                         .map(|(first, days)| {
                             format_days(&(first..=first + Duration::days(i64::from(days) - 1)))
                         })
                         .unwrap_or_default(),
-                    hint: "The most days in a row with tracked time in this period.".to_owned(),
+                    hint: texts.longest_streak_hint.to_owned(),
                 },
                 Tile {
-                    caption: "Current streak",
+                    caption: texts.current_streak,
                     value: format_day_count(current),
-                    note: "in a row until now".to_owned(),
-                    hint: "Days in a row with tracked time, up to today.".to_owned(),
+                    note: texts.in_a_row_until_now.to_owned(),
+                    hint: texts.current_streak_hint.to_owned(),
                 },
             ],
         );
@@ -1259,12 +1277,12 @@ pub fn project_comparison(ui: &mut egui::Ui, store: &Store, now: i64) {
     }
     card(ui, |ui| {
         row(ui, ROW_HEIGHT, |ui| {
-            section_title(ui, "Projects compared");
-            ui.label(RichText::new("by activity").weak());
+            section_title(ui, tr().projects_compared);
+            ui.label(RichText::new(tr().by_activity).weak());
         });
         ui.spacing_mut().item_spacing.y = 0.0;
         let text = palette(ui).text;
-        mix_row(ui, store, &ranks, None, "All projects", text, &all);
+        mix_row(ui, store, &ranks, None, tr().all_projects, text, &all);
         for (index, mix) in mixes.iter().enumerate().rev() {
             if mix.seconds == 0 {
                 continue;

@@ -208,7 +208,7 @@ fn distance_to_segment(point: (f32, f32), from: (f32, f32), to: (f32, f32)) -> f
 #[cfg(target_os = "windows")]
 pub fn set_taskbar_running(frame: &eframe::Frame, running: bool) {
     use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-    use windows::core::{w, PCWSTR};
+    use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -239,7 +239,8 @@ pub fn set_taskbar_running(frame: &eframe::Frame, running: bool) {
 
         if running {
             if let Ok(icon) = create_running_overlay_icon() {
-                let _ = taskbar.SetOverlayIcon(hwnd, icon, w!("Timer running"));
+                let description = HSTRING::from(crate::i18n::tr().timer_running);
+                let _ = taskbar.SetOverlayIcon(hwnd, icon, &description);
                 let _ = DestroyIcon(icon);
             }
         } else {

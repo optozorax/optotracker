@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use atomic_write_file::AtomicWriteFile;
 use chrono::Datelike as _;
 
-use crate::model::{Store, CURRENT_FORMAT_VERSION};
+use crate::model::{ModelError, Store, CURRENT_FORMAT_VERSION};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -19,22 +19,35 @@ pub enum LoadError {
     #[error("{path} uses unsupported data format version {version}")]
     UnsupportedVersion { path: PathBuf, version: u32 },
     #[error("invalid data in {path}: {reason}")]
-    Invalid { path: PathBuf, reason: String },
+    Invalid { path: PathBuf, reason: ModelError },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
     #[error("refusing to save invalid data: {0}")]
-    Invalid(String),
+    Invalid(ModelError),
     #[error("could not encode tracker data: {0}")]
     Encode(#[from] serde_json::Error),
     #[error("could not save {path}: {source}")]
     Write { path: PathBuf, source: io::Error },
 }
 
+/// Why the weekly backup was not made. The data is saved all the same.
+#[derive(Debug, thiserror::Error)]
+pub enum BackupError {
+    #[error("could not create the backup folder: {0}")]
+    CreateFolder(io::Error),
+    #[error("could not create the weekly backup: {0}")]
+    CreateFile(io::Error),
+    #[error("could not read data for the weekly backup: {0}")]
+    ReadData(io::Error),
+    #[error("could not finish the weekly backup: {0}")]
+    Finish(io::Error),
+}
+
 #[derive(Debug, Default)]
 pub struct SaveOutcome {
-    pub backup_warning: Option<String>,
+    pub backup_warning: Option<BackupError>,
 }
 
 #[derive(Clone, Debug)]
@@ -79,17 +92,15 @@ impl JsonStore {
                 });
             }
         }
-        store.validate().map_err(|error| LoadError::Invalid {
+        store.validate().map_err(|reason| LoadError::Invalid {
             path: self.path.clone(),
-            reason: error.to_string(),
+            reason,
         })?;
         Ok(store)
     }
 
     pub fn save(&self, store: &Store) -> Result<SaveOutcome, SaveError> {
-        store
-            .validate()
-            .map_err(|error| SaveError::Invalid(error.to_string()))?;
+        store.validate().map_err(SaveError::Invalid)?;
         let backup_warning = back_up_if_due(&self.path).err();
         let mut json = serde_json::to_vec_pretty(store)?;
         json.push(b'\n');
@@ -101,7 +112,7 @@ impl JsonStore {
     }
 }
 
-fn back_up_if_due(source: &Path) -> Result<(), String> {
+fn back_up_if_due(source: &Path) -> Result<(), BackupError> {
     if !source.is_file() {
         return Ok(());
     }
@@ -113,21 +124,23 @@ fn back_up_if_due(source: &Path) -> Result<(), String> {
     back_up_for_week(source, &directory, week.year(), week.week())
 }
 
-fn back_up_for_week(source: &Path, directory: &Path, year: i32, week: u32) -> Result<(), String> {
+fn back_up_for_week(
+    source: &Path,
+    directory: &Path,
+    year: i32,
+    week: u32,
+) -> Result<(), BackupError> {
     let backup = directory.join(format!("data-{year}-W{week:02}.json"));
     if backup.exists() {
         return Ok(());
     }
-    fs::create_dir_all(directory)
-        .map_err(|error| format!("could not create the backup folder: {error}"))?;
-    let mut temporary = AtomicWriteFile::open(&backup)
-        .map_err(|error| format!("could not create the weekly backup: {error}"))?;
-    let bytes = fs::read(source)
-        .map_err(|error| format!("could not read data for the weekly backup: {error}"))?;
+    fs::create_dir_all(directory).map_err(BackupError::CreateFolder)?;
+    let mut temporary = AtomicWriteFile::open(&backup).map_err(BackupError::CreateFile)?;
+    let bytes = fs::read(source).map_err(BackupError::ReadData)?;
     temporary
         .write_all(&bytes)
         .and_then(|()| temporary.commit())
-        .map_err(|error| format!("could not finish the weekly backup: {error}"))
+        .map_err(BackupError::Finish)
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {

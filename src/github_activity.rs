@@ -27,6 +27,15 @@ pub enum CellFill<'a> {
     Segmented(&'a [Segment]),
 }
 
+/// The names along the edges of the calendar.
+#[derive(Clone, Copy)]
+pub struct Labels {
+    /// From January.
+    pub months: [&'static str; 12],
+    /// From Monday. Only the first and the last of them are shown.
+    pub weekdays: [&'static str; DAYS],
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SelectionChange {
     #[default]
@@ -40,8 +49,9 @@ pub enum SelectionChange {
 /// Its last 53 columns hold the current calendar year. A window wide enough
 /// for more columns shows the preceding weeks to their left, and the whole
 /// calendar can be dragged or scrolled in either direction. The caller
-/// supplies cell presentation and tooltip content, so the widget does not
-/// know what the dates or colors mean.
+/// supplies cell presentation, tooltip content and the names of months and
+/// weekdays, so the widget does not know what the dates or colors mean or
+/// which language it speaks.
 pub struct CalendarHeatmap {
     /// Whole weeks scrolled away from the current year, positive into the past.
     week_offset: i32,
@@ -105,6 +115,7 @@ impl CalendarHeatmap {
         ui: &mut egui::Ui,
         today: NaiveDate,
         selected: Option<NaiveDate>,
+        labels: &Labels,
         fill: impl Fn(NaiveDate) -> CellFill<'a>,
         tooltip: impl Fn(&mut egui::Ui, NaiveDate),
     ) -> SelectionChange {
@@ -208,7 +219,7 @@ impl CalendarHeatmap {
             }
         }
 
-        Self::paint_labels(ui, first_day, weeks, origin, step);
+        Self::paint_labels(ui, labels, first_day, weeks, origin, step);
 
         if selected.is_some() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             SelectionChange::Clear
@@ -295,6 +306,7 @@ impl CalendarHeatmap {
 
     fn paint_labels(
         ui: &egui::Ui,
+        labels: &Labels,
         first_day: NaiveDate,
         weeks: usize,
         origin: egui::Pos2,
@@ -307,11 +319,11 @@ impl CalendarHeatmap {
             Color32::from_rgb(87, 96, 106)
         };
 
-        for (weekday, label) in [(0, "Mon"), (6, "Sun")] {
+        for weekday in [0, DAYS - 1] {
             ui.painter().text(
                 origin + egui::vec2(-LABEL_WIDTH, weekday as f32 * step + step * 0.4),
                 Align2::LEFT_CENTER,
-                label,
+                labels.weekdays[weekday],
                 font.clone(),
                 color,
             );
@@ -335,7 +347,7 @@ impl CalendarHeatmap {
                 ui.painter().text(
                     origin + egui::vec2(week as f32 * step, DAYS as f32 * step + 2.0),
                     Align2::LEFT_TOP,
-                    month_name(date.month()),
+                    labels.months[date.month0() as usize],
                     font.clone(),
                     color,
                 );
@@ -440,22 +452,4 @@ pub fn heat_color(value: f32, dark_mode: bool) -> Color32 {
         shades[3]
     };
     Color32::from_rgb(red, green, blue)
-}
-
-fn month_name(month: u32) -> &'static str {
-    match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "",
-    }
 }

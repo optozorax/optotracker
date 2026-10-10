@@ -6,16 +6,17 @@
 use std::fs;
 use std::path::Path;
 
+use crate::i18n::tr;
 use crate::paths::AppPaths;
 
 pub fn install_current_executable(paths: &AppPaths) -> Result<(), String> {
     let source = std::env::current_exe()
-        .map_err(|error| format!("Could not locate the running executable: {error}"))?;
+        .map_err(|error| format!("{}: {error}", tr().executable_not_found))?;
     fs::create_dir_all(&paths.directory)
-        .map_err(|error| format!("Could not create the application folder: {error}"))?;
+        .map_err(|error| format!("{}: {error}", tr().folder_not_created))?;
     if !same_file(&source, &paths.installed_executable) {
         fs::copy(&source, &paths.installed_executable)
-            .map_err(|error| format!("Could not install OptoTracker: {error}"))?;
+            .map_err(|error| format!("{}: {error}", tr().install_failed))?;
     }
     Ok(())
 }
@@ -25,10 +26,11 @@ pub fn is_installed(paths: &AppPaths) -> bool {
 }
 
 pub fn open_app_directory(paths: &AppPaths) -> Result<(), String> {
+    let directory = paths.directory.display();
     fs::create_dir_all(&paths.directory)
-        .map_err(|error| format!("Could not create {}: {error}", paths.directory.display()))?;
+        .map_err(|error| format!("{} {directory}: {error}", tr().could_not_create))?;
     open::that(&paths.directory)
-        .map_err(|error| format!("Could not open {}: {error}", paths.directory.display()))
+        .map_err(|error| format!("{} {directory}: {error}", tr().could_not_open))
 }
 
 fn same_file(left: &Path, right: &Path) -> bool {
@@ -40,13 +42,13 @@ fn same_file(left: &Path, right: &Path) -> bool {
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{install_current_executable, AppPaths};
+    use super::{install_current_executable, tr, AppPaths};
     use std::os::windows::ffi::OsStrExt as _;
     use std::os::windows::process::CommandExt as _;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use windows::core::{Interface as _, PCWSTR};
+    use windows::core::{Interface as _, HSTRING, PCWSTR};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER,
@@ -106,12 +108,12 @@ mod platform {
                 .args(["delete", RUN_KEY, "/v", VALUE_NAME, "/f"])
                 .status()
         }
-        .map_err(|error| format!("Could not update Windows autorun: {error}"))?;
+        .map_err(|error| format!("{}: {error}", tr().autorun_not_updated))?;
 
         if status.success() {
             Ok(())
         } else {
-            Err("Windows rejected the autorun change".to_owned())
+            Err(tr().autorun_rejected.to_owned())
         }
     }
 
@@ -124,34 +126,34 @@ mod platform {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let desktop_pointer = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None)
-                .map_err(|error| format!("Could not locate the Desktop folder: {error}"))?;
+                .map_err(|error| format!("{}: {error}", tr().desktop_not_found))?;
             let desktop = desktop_pointer
                 .to_string()
                 .map(PathBuf::from)
-                .map_err(|error| format!("Could not read the Desktop folder path: {error}"));
+                .map_err(|error| format!("{}: {error}", tr().desktop_path_unreadable));
             CoTaskMemFree(Some(desktop_pointer.0.cast()));
             let shortcut = desktop?.join("OptoTracker.lnk");
 
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-                .map_err(|error| format!("Could not create a desktop shortcut: {error}"))?;
+                .map_err(|error| format!("{}: {error}", tr().shortcut_not_created))?;
             let executable = wide_path(&paths.installed_executable);
             let working_directory = wide_path(&paths.directory);
             link.SetPath(PCWSTR(executable.as_ptr()))
-                .map_err(|error| format!("Could not set the shortcut target: {error}"))?;
+                .map_err(|error| format!("{}: {error}", tr().shortcut_target_not_set))?;
             link.SetWorkingDirectory(PCWSTR(working_directory.as_ptr()))
-                .map_err(|error| format!("Could not set the shortcut folder: {error}"))?;
-            link.SetDescription(windows::core::w!("Open OptoTracker"))
-                .map_err(|error| format!("Could not set the shortcut description: {error}"))?;
+                .map_err(|error| format!("{}: {error}", tr().shortcut_folder_not_set))?;
+            link.SetDescription(&HSTRING::from(tr().shortcut_description))
+                .map_err(|error| format!("{}: {error}", tr().shortcut_description_not_set))?;
             link.SetIconLocation(PCWSTR(executable.as_ptr()), 0)
-                .map_err(|error| format!("Could not set the shortcut icon: {error}"))?;
+                .map_err(|error| format!("{}: {error}", tr().shortcut_icon_not_set))?;
 
             let persistence: IPersistFile = link
                 .cast()
-                .map_err(|error| format!("Could not save the desktop shortcut: {error}"))?;
+                .map_err(|error| format!("{}: {error}", tr().shortcut_not_saved))?;
             let shortcut = wide_path(&shortcut);
             persistence
                 .Save(PCWSTR(shortcut.as_ptr()), true)
-                .map_err(|error| format!("Could not save the desktop shortcut: {error}"))
+                .map_err(|error| format!("{}: {error}", tr().shortcut_not_saved))
         }
     }
 

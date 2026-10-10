@@ -1,6 +1,7 @@
 #[cfg(target_os = "windows")]
 mod platform {
-    use windows::core::w;
+    use crate::i18n::tr;
+    use windows::core::{w, HSTRING};
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
@@ -31,11 +32,12 @@ mod platform {
         }
 
         pub fn show_already_running_message() {
-            // SAFETY: both strings are static and the message box has no owner.
+            // SAFETY: both strings remain alive for the call and the message
+            // box has no owner.
             unsafe {
                 MessageBoxW(
                     None,
-                    w!("OptoTracker is already running. Open it from the system tray."),
+                    &HSTRING::from(tr().already_running),
                     w!("OptoTracker"),
                     MB_OK | MB_ICONINFORMATION,
                 );
@@ -43,15 +45,13 @@ mod platform {
         }
 
         pub fn show_error_message(message: &str) {
-            use windows::core::PCWSTR;
-
-            let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-            // SAFETY: both UTF-16 strings are terminated and remain alive for the call.
+            // SAFETY: both strings remain alive for the call and the message
+            // box has no owner.
             unsafe {
                 MessageBoxW(
                     None,
-                    PCWSTR(message.as_ptr()),
-                    w!("OptoTracker could not start"),
+                    &HSTRING::from(message),
+                    &HSTRING::from(tr().could_not_start),
                     MB_OK,
                 );
             }
@@ -70,6 +70,8 @@ mod platform {
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
+    use crate::i18n::tr;
+
     pub struct SingleInstanceGuard;
 
     impl SingleInstanceGuard {
@@ -80,7 +82,7 @@ mod platform {
         pub fn show_already_running_message() {}
 
         pub fn show_error_message(message: &str) {
-            eprintln!("OptoTracker could not start: {message}");
+            eprintln!("{}: {message}", tr().could_not_start);
         }
     }
 }

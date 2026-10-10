@@ -94,6 +94,11 @@ whatever Windows is set to, choose it in Settings.
        alt="The Time entries tab in the dark theme">
 </p>
 
+### English and Russian
+
+The interface is in English or in Russian. Choose the language in Settings; it
+changes at once.
+
 ### Windows integration
 
 - Closing or minimizing the window sends OptoTracker to the tray. This can be

@@ -17,27 +17,34 @@ pub enum TimeEndpoint {
     Stop,
 }
 
+/// Why an edited time or date cannot be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TimeError {
+    #[error("That local time does not exist on this computer")]
+    NoSuchLocalTime,
+    #[error("Time is out of range")]
+    TimeOutOfRange,
+    #[error("Date is out of range")]
+    DateOutOfRange,
+    #[error("Start and stop time cannot be equal")]
+    SameStartAndStop,
+    #[error("A time entry must be between 1 second and 24 hours")]
+    EntryLength,
+    #[error("Time must use HH:MM or HHMM")]
+    Format,
+}
+
 pub fn datetime(seconds: i64) -> DateTime<Local> {
     DateTime::from_timestamp(seconds, 0)
         .unwrap_or(DateTime::UNIX_EPOCH)
         .with_timezone(&Local)
 }
 
-/// Formats a local calendar date consistently in day-month-year order.
-pub fn format_date(date: NaiveDate) -> String {
-    date.format("%-d %b %Y").to_string()
-}
-
-/// Formats a local calendar date with its weekday in day-month-year order.
-pub fn format_date_with_weekday(date: NaiveDate) -> String {
-    date.format("%A, %-d %b %Y").to_string()
-}
-
-pub fn timestamp(value: NaiveDateTime) -> Result<i64, String> {
+pub fn timestamp(value: NaiveDateTime) -> Result<i64, TimeError> {
     match Local.from_local_datetime(&value) {
         LocalResult::Single(value) => Ok(value.timestamp()),
         LocalResult::Ambiguous(first, _) => Ok(first.timestamp()),
-        LocalResult::None => Err("That local time does not exist on this computer".to_owned()),
+        LocalResult::None => Err(TimeError::NoSuchLocalTime),
     }
 }
 
@@ -67,7 +74,7 @@ pub fn edit_time(
     original: TimeRange,
     endpoint: TimeEndpoint,
     edited_text: &str,
-) -> Result<TimeRange, String> {
+) -> Result<TimeRange, TimeError> {
     let original_start = datetime(original.started_at.0);
     let original_stop = datetime(original.stopped_at.0);
     let original_endpoint = match endpoint {
@@ -77,7 +84,7 @@ pub fn edit_time(
     let edited = parse_time(edited_text)?
         .with_second(original_endpoint.second())
         .and_then(|time| time.with_nanosecond(original_endpoint.nanosecond()))
-        .ok_or_else(|| "Time is out of range".to_owned())?;
+        .ok_or(TimeError::TimeOutOfRange)?;
     let date = original_start.date_naive();
     let start_time = if endpoint == TimeEndpoint::Start {
         edited
@@ -90,11 +97,10 @@ pub fn edit_time(
         original_stop.time()
     };
     if start_time == stop_time {
-        return Err("Start and stop time cannot be equal".to_owned());
+        return Err(TimeError::SameStartAndStop);
     }
     let stop_date = if stop_time < start_time {
-        date.succ_opt()
-            .ok_or_else(|| "Date is out of range".to_owned())?
+        date.succ_opt().ok_or(TimeError::DateOutOfRange)?
     } else {
         date
     };
@@ -102,7 +108,7 @@ pub fn edit_time(
     let stopped_at = timestamp(NaiveDateTime::new(stop_date, stop_time))?;
     let duration = stopped_at - started_at;
     if duration <= 0 || duration > MAX_ENTRY_SECONDS {
-        return Err("A time entry must be between 1 second and 24 hours".to_owned());
+        return Err(TimeError::EntryLength);
     }
     Ok(TimeRange {
         started_at: UnixSeconds(started_at),
@@ -112,7 +118,7 @@ pub fn edit_time(
 
 /// Moves an entry to a new local start date while preserving its displayed
 /// start and stop times and whether its stop falls on a later local date.
-pub fn edit_date(original: TimeRange, date: NaiveDate) -> Result<TimeRange, String> {
+pub fn edit_date(original: TimeRange, date: NaiveDate) -> Result<TimeRange, TimeError> {
     let original_start = datetime(original.started_at.0);
     let original_stop = datetime(original.stopped_at.0);
     let day_offset = original_stop
@@ -121,12 +127,12 @@ pub fn edit_date(original: TimeRange, date: NaiveDate) -> Result<TimeRange, Stri
         .num_days();
     let stop_date = date
         .checked_add_signed(chrono::Duration::days(day_offset))
-        .ok_or_else(|| "Date is out of range".to_owned())?;
+        .ok_or(TimeError::DateOutOfRange)?;
     let started_at = timestamp(NaiveDateTime::new(date, original_start.time()))?;
     let stopped_at = timestamp(NaiveDateTime::new(stop_date, original_stop.time()))?;
     let duration = stopped_at - started_at;
     if duration <= 0 || duration > MAX_ENTRY_SECONDS {
-        return Err("A time entry must be between 1 second and 24 hours".to_owned());
+        return Err(TimeError::EntryLength);
     }
     Ok(TimeRange {
         started_at: UnixSeconds(started_at),
@@ -140,46 +146,39 @@ pub fn edit_active_start(
     original: UnixSeconds,
     now: UnixSeconds,
     time_text: &str,
-) -> Result<UnixSeconds, String> {
+) -> Result<UnixSeconds, TimeError> {
     let original_time = datetime(original.0).time();
     let mut time = parse_time(time_text)?;
     if time.hour() == original_time.hour() && time.minute() == original_time.minute() {
         time = time
             .with_second(original_time.second())
-            .ok_or_else(|| "Time is out of range".to_owned())?;
+            .ok_or(TimeError::TimeOutOfRange)?;
     }
     let current = datetime(now.0);
     let date = if (time.hour(), time.minute()) > (current.hour(), current.minute()) {
         current
             .date_naive()
             .pred_opt()
-            .ok_or_else(|| "Date is out of range".to_owned())?
+            .ok_or(TimeError::DateOutOfRange)?
     } else {
         current.date_naive()
     };
     timestamp(NaiveDateTime::new(date, time)).map(UnixSeconds)
 }
 
-fn parse_time(text: &str) -> Result<NaiveTime, String> {
+fn parse_time(text: &str) -> Result<NaiveTime, TimeError> {
     let text = text.trim();
     let format = match text.as_bytes() {
         [_, _, b':', _, _] => "%H:%M",
         [_, _, _, _] => "%H%M",
-        _ => return Err("Time must use HH:MM or HHMM".to_owned()),
+        _ => return Err(TimeError::Format),
     };
-    NaiveTime::parse_from_str(text, format).map_err(|_| "Time must use HH:MM or HHMM".to_owned())
+    NaiveTime::parse_from_str(text, format).map_err(|_| TimeError::Format)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dates_use_day_month_year_order() {
-        let date = NaiveDate::from_ymd_opt(2026, 9, 15).unwrap();
-        assert_eq!(format_date(date), "15 Sep 2026");
-        assert_eq!(format_date_with_weekday(date), "Tuesday, 15 Sep 2026");
-    }
 
     #[test]
     fn split_durations_add_up_to_the_original_interval() {
@@ -318,7 +317,7 @@ mod tests {
     #[test]
     fn malformed_time_reports_both_accepted_formats() {
         let error = parse_time("945").unwrap_err();
-        assert_eq!(error, "Time must use HH:MM or HHMM");
+        assert_eq!(error.to_string(), "Time must use HH:MM or HHMM");
     }
 
     #[test]

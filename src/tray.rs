@@ -8,6 +8,7 @@ pub enum TrayAction {
 mod platform {
     use super::TrayAction;
     use crate::app_icon;
+    use crate::i18n::tr;
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Arc;
     use tray_icon::{
@@ -17,6 +18,7 @@ mod platform {
 
     pub struct TrayController {
         icon: TrayIcon,
+        exit_item: MenuItem,
         actions: Receiver<TrayAction>,
     }
 
@@ -25,7 +27,7 @@ mod platform {
         /// sleep between tray interactions instead of polling for them.
         pub fn new(running: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
             let menu = Menu::new();
-            let exit_item = MenuItem::new("Exit OptoTracker", true, None);
+            let exit_item = MenuItem::new(tr().exit, true, None);
             menu.append(&exit_item).map_err(|error| error.to_string())?;
 
             // The handlers must be registered before the icon exists: both
@@ -73,7 +75,17 @@ mod platform {
                 .build()
                 .map_err(|error| error.to_string())?;
 
-            Ok(Self { icon, actions })
+            Ok(Self {
+                icon,
+                exit_item,
+                actions,
+            })
+        }
+
+        /// Writes the menu in the language that the interface has changed
+        /// to. The tooltip follows with the next [`Self::set_running`].
+        pub fn translate(&self) {
+            self.exit_item.set_text(tr().exit);
         }
 
         pub fn set_running(&self, running: bool) -> Result<(), String> {
@@ -105,7 +117,7 @@ mod platform {
 
     fn tooltip(running: bool) -> &'static str {
         if running {
-            "OptoTracker — timer running"
+            tr().tray_timer_running
         } else {
             "OptoTracker"
         }
@@ -125,6 +137,8 @@ mod platform {
         ) -> Result<Self, String> {
             Err("system tray integration is unavailable on this platform".to_owned())
         }
+
+        pub fn translate(&self) {}
 
         pub fn set_running(&self, _running: bool) -> Result<(), String> {
             Ok(())
