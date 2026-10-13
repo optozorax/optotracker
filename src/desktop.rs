@@ -16,17 +16,18 @@ mod platform;
 #[cfg(target_os = "macos")]
 #[path = "desktop/macos.rs"]
 mod platform;
-#[cfg(target_os = "linux")]
-#[path = "desktop/linux.rs"]
+// Linux and FreeBSD: `build.rs` gives the two one name.
+#[cfg(freedesktop)]
+#[path = "desktop/freedesktop.rs"]
 mod platform;
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-compile_error!("OptoTracker is written for Windows, macOS and Linux");
+#[cfg(not(any(target_os = "windows", target_os = "macos", freedesktop)))]
+compile_error!("OptoTracker is written for Windows, macOS, Linux and FreeBSD");
 
 pub use platform::{autorun_enabled, create_desktop_shortcut, set_autorun};
 
 #[cfg(target_os = "macos")]
 pub use platform::{bundle_into, on_reopen, system_fonts};
-#[cfg(target_os = "linux")]
+#[cfg(freedesktop)]
 pub use platform::{
     event_loop_builder, system_fonts, system_theme, watch_system_theme, window_can_hide, APP_ID,
 };
@@ -95,27 +96,27 @@ pub struct SystemFonts {
 #[cfg(not(target_os = "windows"))]
 pub fn keep_window_theme(_frame: &eframe::Frame, _keep: bool) {}
 
-/// Only Linux offers a choice between windowing systems.
-#[cfg(not(target_os = "linux"))]
+/// Only Linux and FreeBSD offer a choice between windowing systems.
+#[cfg(not(freedesktop))]
 pub fn event_loop_builder() -> Option<eframe::EventLoopBuilderHook> {
     None
 }
 
 /// Whether a window can be taken off the screen and brought back, which
 /// sending it to the tray comes down to.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(freedesktop))]
 pub fn window_can_hide() -> bool {
     true
 }
 
 /// The theme of the system where the window does not learn it by itself,
-/// which is the case on Linux only.
-#[cfg(not(target_os = "linux"))]
+/// which is the case on Linux and FreeBSD only.
+#[cfg(not(freedesktop))]
 pub fn system_theme() -> Option<eframe::egui::Theme> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(freedesktop))]
 pub fn watch_system_theme(_changed: impl Fn() + Send + 'static) {}
 
 /// Only macOS has a Dock, whose icon opens an application that already runs.

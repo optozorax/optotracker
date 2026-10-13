@@ -148,9 +148,9 @@ fn main() -> eframe::Result {
         .with_visible(true)
         .with_inner_size([720.0, 620.0])
         .with_min_inner_size([420.0, 320.0]);
-    // What a desktop of Linux finds the entry in its menu by, and with it
-    // the icon, for a window that is open.
-    #[cfg(target_os = "linux")]
+    // What a desktop of Linux or FreeBSD finds the entry in its menu by, and
+    // with it the icon, for a window that is open.
+    #[cfg(freedesktop)]
     let viewport = viewport.with_app_id(desktop::APP_ID);
     let options = eframe::NativeOptions {
         viewport,
@@ -539,9 +539,9 @@ impl TimeTrackerApp {
         });
         let message = match &tray {
             Ok(_) => String::new(),
-            // A desktop of Linux without a tray is nothing out of the
-            // ordinary. Settings says what follows from it.
-            Err(_) if cfg!(target_os = "linux") => String::new(),
+            // A desktop of Linux or FreeBSD without a tray is nothing out
+            // of the ordinary. Settings says what follows from it.
+            Err(_) if cfg!(freedesktop) => String::new(),
             Err(error) => format!("{}: {error}", tr().tray_not_created),
         };
         let tray = tray.ok();
@@ -1694,13 +1694,13 @@ impl TimeTrackerApp {
                 ),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
-            #[cfg(target_os = "linux")]
+            #[cfg(freedesktop)]
             let note = if self.hides_to_tray {
                 tr().to_tray_note
             } else {
                 tr().to_tray_unavailable
             };
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(freedesktop))]
             let note = tr().to_tray_note;
             ui.label(RichText::new(note).small().color(palette(ui).muted));
         });

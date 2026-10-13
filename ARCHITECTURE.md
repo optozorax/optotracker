@@ -65,7 +65,7 @@ Saving validates the entire snapshot first. The UI retains the last saved
 snapshot and restores it if persistence fails. Backup failure is reported as a
 warning but does not block the primary atomic save.
 
-## Windows, macOS and Linux
+## Windows, macOS, Linux and FreeBSD
 
 The model, storage, reports, local-calendar policy and the widgets are the
 same on every system. What differs is behind the boundaries named above, and
@@ -76,7 +76,7 @@ persistence and the installed copy of the program. What has to be elsewhere
 for the system to find it, the start at sign-in and the shortcut, is written
 only when the user asks for it and points back into the folder.
 
-| | Windows | macOS | Linux |
+| | Windows | macOS | Linux, FreeBSD |
 | --- | --- | --- | --- |
 | Folder | `%APPDATA%\OptoTracker` | `~/Library/Application Support/OptoTracker` | `~/.local/share/OptoTracker` |
 | Installed copy | `OptoTracker.exe` | `OptoTracker.app`, a bundle | `opto-tracker` |
@@ -90,17 +90,23 @@ only when the user asks for it and points back into the folder.
 - `desktop.rs` holds what the systems share and one file per system in
   `desktop/`. The texts in `i18n.rs` that name a system, or that only one
   system says, are given once per system with `#[cfg]`.
-- `tray.rs` is one implementation on the `tray-icon` crate. On Linux that
-  crate speaks D-Bus by itself, so the executable needs no GTK. A desktop
-  without a tray is not an error there: the window then closes for real.
+- Linux and FreeBSD have the same desktops, which follow the freedesktop
+  specifications, so the two share everything: `desktop/freedesktop.rs` and
+  the texts. `build.rs` gives them one name, and the sources ask for both
+  with `#[cfg(freedesktop)]`. Only the title of their settings differs.
+- `tray.rs` is one implementation on the `tray-icon` crate. On Linux and
+  FreeBSD that crate speaks D-Bus by itself, so the executable needs no GTK.
+  A desktop without a tray is not an error there: the window then closes
+  for real.
 - macOS expects an application to be a bundle. The executable writes its own
   (`--bundle`, and "Install" in Settings), with an icon that it draws, so
   that a release needs no packaging tools and no files beside the sources.
 - A window of Wayland cannot leave the screen and come back, which sending
-  it to the tray comes down to. On Linux the window is therefore opened with
-  X11 where that is offered, and with Wayland only where it is not.
+  it to the tray comes down to. On Linux and FreeBSD the window is therefore
+  opened with X11 where that is offered, and with Wayland only where it is
+  not.
 - The fonts are those of the system: a list of files on Windows and macOS,
-  and whatever fontconfig names on Linux. The rows of the timer and of the
+  and whatever fontconfig names elsewhere. The rows of the timer and of the
   entries measure the clock in the font that was found, since the digits of
   the systems differ in width.
 

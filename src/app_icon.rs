@@ -55,7 +55,7 @@ pub fn tray_icon_data(running: bool) -> IconData {
 
 /// The icon as a picture of any size, for the files that a desktop shows it
 /// from.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(freedesktop, target_os = "macos"))]
 pub fn application_icon(size: u32) -> IconData {
     // The icons of macOS leave about a tenth of their square empty on every
     // side, so the tile is drawn smaller there to match its neighbours.
@@ -67,7 +67,7 @@ pub fn application_icon(size: u32) -> IconData {
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(freedesktop, target_os = "macos"))]
 pub fn png(icon: &IconData) -> Result<Vec<u8>, String> {
     let mut file = Vec::new();
     let mut encoder = png::Encoder::new(&mut file, icon.width, icon.height);

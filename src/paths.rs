@@ -29,7 +29,7 @@ pub struct AppPaths {
 impl AppPaths {
     /// The folder that everything is kept in: `%APPDATA%\OptoTracker` on
     /// Windows, `~/Library/Application Support/OptoTracker` on macOS and
-    /// `~/.local/share/OptoTracker` on Linux.
+    /// `~/.local/share/OptoTracker` on Linux and FreeBSD.
     pub fn discover() -> Result<Self, String> {
         let directory = directories::BaseDirs::new()
             .map(|directories| directories.data_dir().join("OptoTracker"))

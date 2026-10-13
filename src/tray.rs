@@ -14,7 +14,7 @@ pub enum TrayAction {
 }
 
 /// The icon in the notification area of Windows, in the menu bar of macOS,
-/// or in the tray of a Linux desktop that has one.
+/// or in the tray of a Linux or FreeBSD desktop that has one.
 pub struct TrayController {
     icon: TrayIcon,
     show_item: Option<MenuItem>,
@@ -28,7 +28,7 @@ impl TrayController {
     pub fn new(running: bool, wake: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
         let menu = Menu::new();
         // On Windows a click on the icon shows the window. A click opens
-        // the menu on macOS, and on some desktops of Linux, so there the
+        // the menu on macOS, and on some desktops elsewhere, so there the
         // menu has to offer the window too.
         let show_item =
             (!cfg!(target_os = "windows")).then(|| MenuItem::new(tr().open_app, true, None));
@@ -91,9 +91,9 @@ impl TrayController {
             .with_menu_on_left_click(cfg!(target_os = "macos"))
             .with_tooltip(tooltip(running))
             .with_icon(tray_image(running)?);
-        if cfg!(target_os = "linux") {
-            // What a tray of Linux calls the icon. macOS would write it
-            // out next to the icon.
+        if cfg!(freedesktop) {
+            // What a tray of Linux or FreeBSD calls the icon. macOS would
+            // write it out next to the icon.
             icon = icon.with_title("OptoTracker");
         }
         let icon = icon.build().map_err(|error| error.to_string())?;
@@ -142,7 +142,7 @@ fn tray_image(running: bool) -> Result<tray_icon::Icon, String> {
         .map_err(|error| error.to_string())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(freedesktop))]
 fn tooltip(running: bool) -> &'static str {
     if running {
         tr().tray_timer_running
@@ -151,9 +151,9 @@ fn tooltip(running: bool) -> &'static str {
     }
 }
 
-/// A tray of Linux shows the tooltip under the name of the icon, so the
-/// name is not said again.
-#[cfg(target_os = "linux")]
+/// A tray of Linux or FreeBSD shows the tooltip under the name of the icon,
+/// so the name is not said again.
+#[cfg(freedesktop)]
 fn tooltip(running: bool) -> &'static str {
     if running {
         tr().timer_running

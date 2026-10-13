@@ -67,7 +67,8 @@ pub fn tr() -> &'static Texts {
 ///
 /// A line may be preceded by `#[cfg(...)]`. That is how a text that names
 /// the system, or that only one of the systems needs, is given once for each
-/// of them.
+/// of them. `freedesktop` stands for Linux and FreeBSD, whose desktops are
+/// the same.
 macro_rules! texts {
     ($($(#[$system:meta])* $name:ident: $english:literal, $russian:literal;)*) => {
         /// The texts of one language.
@@ -248,7 +249,7 @@ texts! {
     theme_system: "Same as Windows", "Как в Windows";
     #[cfg(target_os = "macos")]
     theme_system: "Same as macOS", "Как в macOS";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     theme_system: "Same as the system", "Как в системе";
     theme_light: "Light", "Светлая";
     theme_dark: "Dark", "Тёмная";
@@ -276,15 +277,15 @@ texts! {
     follows_unknown_system:
         "Follows the appearance in the settings of macOS, which could not be read.",
         "Следует оформлению в настройках macOS, но определить его не удалось.";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     follows_dark_system:
         "Follows the color scheme of the desktop, which is dark now.",
         "Следует цветовой схеме рабочего стола; сейчас она тёмная.";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     follows_light_system:
         "Follows the color scheme of the desktop, which is light now.",
         "Следует цветовой схеме рабочего стола; сейчас она светлая.";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     follows_unknown_system:
         "Follows the color scheme of the desktop, which could not be read.",
         "Следует цветовой схеме рабочего стола, но определить её не удалось.";
@@ -296,13 +297,13 @@ texts! {
     install_here: "Install OptoTracker here", "Установить OptoTracker сюда";
     installed: "OptoTracker was installed.", "OptoTracker установлен.";
     open_folder: "Open folder", "Открыть папку";
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(freedesktop))]
     create_shortcut: "Create desktop shortcut", "Создать ярлык на рабочем столе";
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(freedesktop))]
     shortcut_created: "Desktop shortcut created.", "Ярлык на рабочем столе создан.";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     create_shortcut: "Add to the applications menu", "Добавить в меню приложений";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     shortcut_created:
         "OptoTracker was added to the applications menu.",
         "OptoTracker добавлен в меню приложений.";
@@ -319,6 +320,8 @@ texts! {
     system_behavior: "macOS behavior", "Поведение в macOS";
     #[cfg(target_os = "linux")]
     system_behavior: "Linux behavior", "Поведение в Linux";
+    #[cfg(target_os = "freebsd")]
+    system_behavior: "FreeBSD behavior", "Поведение во FreeBSD";
     autorun: "Start OptoTracker when I sign in", "Запускать OptoTracker при входе в систему";
     #[cfg(target_os = "windows")]
     autorun_enabled: "Windows autorun enabled.", "Автозапуск Windows включён.";
@@ -352,7 +355,7 @@ texts! {
     to_tray_note:
         "When disabled, closing the window exits the app.",
         "Если отключено, закрытие окна завершает приложение.";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     to_tray_unavailable:
         "Not available here: this desktop has no system tray, or does not let a window hide.",
         "Здесь недоступно: на этом рабочем столе нет системного трея или окно нельзя скрыть.";
@@ -360,7 +363,7 @@ texts! {
     // What the system shows outside the window.
     exit: "Exit OptoTracker", "Выйти из OptoTracker";
     open_app: "Open OptoTracker", "Открыть OptoTracker";
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(freedesktop))]
     tray_timer_running: "OptoTracker — timer running", "OptoTracker — таймер запущен";
     #[cfg(not(target_os = "macos"))]
     timer_running: "Timer running", "Таймер запущен";
@@ -383,7 +386,7 @@ texts! {
     usage:
         "Usage: OptoTracker [--minimized] [DATA_FILE]\n       OptoTracker --bundle FOLDER",
         "Использование: OptoTracker [--minimized] [ФАЙЛ_ДАННЫХ]\n               OptoTracker --bundle ПАПКА";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     usage:
         "Usage: opto-tracker [--minimized] [DATA_FILE]",
         "Использование: opto-tracker [--minimized] [ФАЙЛ_ДАННЫХ]";
@@ -408,7 +411,7 @@ texts! {
     autorun_rejected:
         "Windows rejected the autorun change",
         "Windows отклонила изменение автозапуска";
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(freedesktop))]
     desktop_not_found:
         "Could not locate the Desktop folder",
         "Не удалось найти папку рабочего стола";
@@ -416,11 +419,11 @@ texts! {
     desktop_path_unreadable:
         "Could not read the Desktop folder path",
         "Не удалось прочитать путь к папке рабочего стола";
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(freedesktop))]
     shortcut_not_created:
         "Could not create a desktop shortcut",
         "Не удалось создать ярлык на рабочем столе";
-    #[cfg(target_os = "linux")]
+    #[cfg(freedesktop)]
     shortcut_not_created:
         "Could not add OptoTracker to the applications menu",
         "Не удалось добавить OptoTracker в меню приложений";
