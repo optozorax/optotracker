@@ -1,5 +1,5 @@
-# Builds OptoTracker for Windows, macOS and Linux and publishes it as a GitHub
-# release.
+# Builds OptoTracker for Windows, macOS, Linux and FreeBSD and publishes it as
+# a GitHub release.
 #
 # To make a release:
 #
@@ -16,6 +16,7 @@
 #   OptoTracker.exe                    Windows
 #   OptoTracker-macos.zip              macOS, for Apple and Intel processors
 #   OptoTracker-linux-x86_64.tar.gz    Linux
+#   OptoTracker-freebsd-x86_64.tar.gz  FreeBSD
 #
 # The workflow can also be started by hand from the Actions tab. That run tests
 # and builds in the same way and keeps the files as artifacts of the run,
@@ -200,12 +201,83 @@ jobs:
           path: dist/OptoTracker-linux-x86_64.tar.gz
           if-no-files-found: error
 
+  freebsd:
+    name: Build for FreeBSD
+    # GitHub has no runners with FreeBSD. The action below starts it in a
+    # virtual machine on the Linux runner, copies the checkout into it, runs
+    # the commands there and copies what they have made back.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Test and build in FreeBSD
+        # Not an action of GitHub's own, so it is used by the commit of its
+        # version 1.5.9 and not by a name that can be moved.
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc
+        with:
+          # FreeBSD runs what was built on an earlier release, and not what
+          # was built on a later one. 14 is the oldest line of releases that
+          # is still supported, so what is built on it serves 14 and 15.
+          release: "14"
+          # Everything comes from FreeBSD's own packages, as is the custom
+          # there, Rust too. That Rust can be a version or two behind the one
+          # of the other builds, and has to reach `rust-version` in
+          # Cargo.toml. The rest is a screen that exists only in memory and
+          # what a window needs, for starting the application.
+          prepare: |
+            pkg install -y rust xorg-vfbserver mesa-dri mesa-libs libX11 libXcursor libXi libxkbcommon
+
+          run: |
+            set -e
+            # Outside the checkout, so that only the archive is copied back.
+            export CARGO_TARGET_DIR="$HOME/target"
+
+            cargo test --release --locked
+            cargo build --release --locked
+
+            # Nothing else runs the application on FreeBSD before it is
+            # released, so one that does not stay up stops the release, and
+            # the page of the run says what it printed.
+            # Neither of the two keeps a hold on what this script is read
+            # from and written to, which would keep the step from ending.
+            Xvfb :7 -screen 0 1280x800x24 < /dev/null > /dev/null 2>&1 &
+            screen=$!
+            sleep 5
+            mkdir -p "$HOME/start"
+            HOME="$HOME/start" DISPLAY=:7 LIBGL_ALWAYS_SOFTWARE=1 \
+              "$CARGO_TARGET_DIR/release/opto-tracker" < /dev/null > start.log 2>&1 &
+            application=$!
+            sleep 15
+            if kill -0 "$application" 2>/dev/null; then
+              echo "OptoTracker kept running."
+              kill "$application" "$screen"
+            else
+              kill "$screen"
+              cat start.log
+              printed="$(tail -c 1500 start.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+              echo "::error title=OptoTracker did not keep running on FreeBSD::$printed"
+              exit 1
+            fi
+
+            # In an archive, which keeps the permission to execute that a
+            # plain download would drop.
+            mkdir dist
+            tar -czf dist/OptoTracker-freebsd-x86_64.tar.gz \
+              -C "$CARGO_TARGET_DIR/release" opto-tracker
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OptoTracker-freebsd
+          path: dist/OptoTracker-freebsd-x86_64.tar.gz
+          if-no-files-found: error
+
   # A separate job, so that only this one may write to the repository: nothing
   # that runs during the builds gets a token that could change a release.
   publish:
     name: Publish the release
     if: github.ref_type == 'tag'
-    needs: [windows, macos, linux]
+    needs: [windows, macos, linux, freebsd]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -223,7 +295,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            OptoTracker.exe OptoTracker-macos.zip OptoTracker-linux-x86_64.tar.gz \
+            OptoTracker.exe OptoTracker-macos.zip \
+            OptoTracker-linux-x86_64.tar.gz OptoTracker-freebsd-x86_64.tar.gz \
             --title "OptoTracker ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             --verify-tag

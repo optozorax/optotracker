@@ -6,7 +6,14 @@ const BLUE: [u8; 3] = [8, 169, 225];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+    let system = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    // Linux and FreeBSD share their desktops, which follow the freedesktop
+    // specifications. What the sources do for both is under `cfg(freedesktop)`.
+    println!("cargo:rustc-check-cfg=cfg(freedesktop)");
+    if matches!(system.as_str(), "linux" | "freebsd") {
+        println!("cargo:rustc-cfg=freedesktop");
+    }
+    if system != "windows" {
         return;
     }
 

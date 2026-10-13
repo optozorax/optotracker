@@ -1,6 +1,6 @@
 [package]
 name = "opto-tracker"
-version = "0.2.2"
+version = "0.2.4"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -51,9 +51,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 png = "0.18"
 tray-icon = "0.25.1"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# Linux and FreeBSD, which `build.rs` calls `freedesktop` for the sources.
 # Both windowing systems, and a tray icon that speaks D-Bus by itself, so that
 # the executable needs neither GTK nor an indicator library to be installed.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["wayland", "x11"] }
 libloading = "0.8"
 png = "0.18"

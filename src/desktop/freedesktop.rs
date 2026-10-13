@@ -1,4 +1,5 @@
-//! Linux, by the freedesktop specifications that its desktops share.
+//! Linux and FreeBSD, by the freedesktop specifications that their desktops
+//! share.
 //!
 //! What Windows keeps in its registry is a desktop entry here: one in the
 //! autostart folder to start with the session, and one among the applications
@@ -73,8 +74,8 @@ pub fn set_autorun(paths: &AppPaths, enabled: bool, start_minimized: bool) -> Re
     }
 }
 
-/// A desktop of Linux shows its applications in a menu rather than as files
-/// on the desktop, so that is where the shortcut goes.
+/// These desktops show their applications in a menu rather than as files on
+/// the desktop, so that is where the shortcut goes.
 pub fn create_desktop_shortcut(paths: &AppPaths) -> Result<(), String> {
     install_current_executable(paths)?;
     let failed = |error: io::Error| format!("{}: {error}", tr().shortcut_not_created);
@@ -166,19 +167,23 @@ pub fn event_loop_builder() -> Option<eframe::EventLoopBuilderHook> {
 
 /// Whether the libraries are there that winit opens a window of X11 with.
 /// It stops the application over a missing one instead of turning to
-/// Wayland, so they are tried here first.
+/// Wayland, so they are tried here first, by the names that winit tries.
 fn x11_is_installed() -> bool {
     [
-        "libX11.so.6",
-        "libX11-xcb.so.1",
-        "libXcursor.so.1",
-        "libXi.so.6",
-        "libxkbcommon-x11.so.0",
+        ["libX11.so.6", "libX11.so"],
+        ["libX11-xcb.so.1", "libX11-xcb.so"],
+        ["libXcursor.so.1", "libXcursor.so"],
+        ["libXi.so.6", "libXi.so"],
+        ["libxkbcommon-x11.so.0", "libxkbcommon-x11.so"],
     ]
     .into_iter()
-    // SAFETY: these are the libraries of the system that winit loads itself
-    // right after, and loading them runs nothing of ours.
-    .all(|library| unsafe { libloading::Library::new(library) }.is_ok())
+    .all(|names| {
+        names.into_iter().any(|library| {
+            // SAFETY: these are the libraries of the system that winit loads
+            // itself right after, and loading them runs nothing of ours.
+            unsafe { libloading::Library::new(library) }.is_ok()
+        })
+    })
 }
 
 pub fn window_can_hide() -> bool {
@@ -236,7 +241,7 @@ pub fn system_theme() -> Option<egui::Theme> {
 /// Follows the color scheme of the desktop and calls `changed` whenever it
 /// becomes another one.
 ///
-/// A window of Linux is not told the scheme. Desktops publish it through the
+/// A window is not told the scheme here. Desktops publish it through the
 /// settings portal, which is asked here on a thread of its own, since a
 /// desktop without a portal may take long to say so. The first answer is
 /// waited for briefly, so that the window does not open in the wrong theme.

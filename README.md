@@ -87,8 +87,9 @@ weekday, the hours of the day you work at, the typical session and your streaks.
 ### Light and dark
 
 OptoTracker is light or dark as the system is: it follows the app mode of
-Windows, the appearance of macOS and the color scheme of a Linux desktop. To
-keep one theme whatever the system is set to, choose it in Settings.
+Windows, the appearance of macOS and the color scheme of a Linux or FreeBSD
+desktop. To keep one theme whatever the system is set to, choose it in
+Settings.
 
 <p align="center">
   <img src="screenshots/time-entries-dark.png" width="760"
@@ -102,27 +103,27 @@ changes at once.
 
 ### On your desktop
 
-OptoTracker runs on Windows, macOS and Linux, and on each of them it behaves
-the way programs there do.
+OptoTracker runs on Windows, macOS, Linux and FreeBSD, and on each of them it
+behaves the way programs there do.
 
-- Closing the window keeps OptoTracker running: in the tray on Windows and
-  Linux, where minimizing sends it there too, and in the menu bar on macOS.
-  This can be turned off in Settings.
+- Closing the window keeps OptoTracker running: in the tray on Windows, Linux
+  and FreeBSD, where minimizing sends it there too, and in the menu bar on
+  macOS. This can be turned off in Settings.
 - The icons show whether a timer is running: those of the window, the taskbar
   and the tray, and on macOS a badge in the Dock.
 - It can start when you sign in, without showing its window.
-- Only one copy runs at a time. On macOS and Linux, starting it again brings
-  the window of the running copy forward.
+- Only one copy runs at a time. Everywhere but on Windows, starting it again
+  brings the window of the running copy forward.
 
 ## Your data
 
 Everything OptoTracker keeps is in one folder:
 
-| System  | Application folder                          |
-| ------- | ------------------------------------------- |
-| Windows | `%APPDATA%\OptoTracker`                     |
-| macOS   | `~/Library/Application Support/OptoTracker` |
-| Linux   | `~/.local/share/OptoTracker`                |
+| System         | Application folder                          |
+| -------------- | ------------------------------------------- |
+| Windows        | `%APPDATA%\OptoTracker`                     |
+| macOS          | `~/Library/Application Support/OptoTracker` |
+| Linux, FreeBSD | `~/.local/share/OptoTracker`                |
 
 Everything you track is in `data.json` there:
 
@@ -178,9 +179,10 @@ The file is used where it is and nothing is copied. OptoTracker expects to be
 the only program that changes the file while it is running.
 
 The other files in the folder can all be deleted at any time. `temp.ron`
-remembers the window size, your settings and your last selections. On macOS
-and Linux, `instance.lock` and `instance.sock` are how a second copy finds the
-one that runs, and on Linux `icon.png` is the icon for the applications menu.
+remembers the window size, your settings and your last selections. Everywhere
+but on Windows, `instance.lock` and `instance.sock` are how a second copy
+finds the one that runs, and on Linux and FreeBSD `icon.png` is the icon for
+the applications menu.
 
 ## Installing
 
@@ -202,22 +204,28 @@ nothing else beyond a desktop. The tray icon appears where the desktop shows
 such icons: on KDE, Xfce, Cinnamon and others by themselves, on GNOME with
 the AppIndicator extension, which Ubuntu comes with.
 
+**FreeBSD.** Unpack `OptoTracker-freebsd-x86_64.tar.gz` and run
+`opto-tracker`. It is built on FreeBSD 14, so it runs on FreeBSD 14 and
+later, and needs nothing beyond a desktop either. There it is the same
+program as on Linux, tray icon included.
+
 To keep it, open **Settings** and press **Install OptoTracker here**. This
 copies the program into the application folder, next to the data. The same
 tab creates a shortcut and turns on starting when you sign in:
 
-| System  | Installed as      | Shortcut                 | Start at sign-in                           |
-| ------- | ----------------- | ------------------------ | ------------------------------------------ |
-| Windows | `OptoTracker.exe` | on the desktop           | a `Run` value in the registry              |
-| macOS   | `OptoTracker.app` | on the desktop           | a launch agent in `~/Library/LaunchAgents` |
-| Linux   | `opto-tracker`    | in the applications menu | an entry in `~/.config/autostart`          |
+| System         | Installed as      | Shortcut                 | Start at sign-in                           |
+| -------------- | ----------------- | ------------------------ | ------------------------------------------ |
+| Windows        | `OptoTracker.exe` | on the desktop           | a `Run` value in the registry              |
+| macOS          | `OptoTracker.app` | on the desktop           | a launch agent in `~/Library/LaunchAgents` |
+| Linux, FreeBSD | `opto-tracker`    | in the applications menu | an entry in `~/.config/autostart`          |
 
 The shortcut and the start at sign-in are the only things that OptoTracker
 writes outside its folder, and only when you ask for them.
 
-On Linux a window can only be sent to the tray under X11, so OptoTracker uses
-X11 where there is one, which on a Wayland desktop means XWayland. Started
-with an empty `DISPLAY`, it uses Wayland itself and closes with its window.
+On Linux and FreeBSD a window can only be sent to the tray under X11, so
+OptoTracker uses X11 where there is one, which on a Wayland desktop means
+XWayland. Started with an empty `DISPLAY`, it uses Wayland itself and closes
+with its window.
 
 To build it yourself you need Rust 1.95 or newer:
 
