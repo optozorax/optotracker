@@ -38,9 +38,10 @@ rules to maintain.
   kept for the whole process, so code that shows a text asks `tr()` for it.
   The model, the storage and the calendar policy stay free of languages: they
   report errors as values, and `i18n.rs` puts those into words.
-- `paths.rs` resolves application paths once. `desktop.rs`, `tray.rs`,
-  `single_instance.rs`, and the taskbar functions in `app_icon.rs` are the only
-  places that contain desktop or operating-system integration.
+- `paths.rs` resolves application paths once. `desktop.rs` with its
+  `desktop/` folder, `tray.rs`, `single_instance.rs`, and the taskbar
+  functions in `app_icon.rs` are the only places that contain desktop or
+  operating-system integration.
 - `main.rs` is the composition layer and egui UI. It turns UI interactions into
   model changes and persists them.
 
@@ -64,21 +65,46 @@ Saving validates the entire snapshot first. The UI retains the last saved
 snapshot and restores it if persistence fails. Backup failure is reported as a
 warning but does not block the primary atomic save.
 
-## Adding Linux later
+## Windows, macOS and Linux
 
-The model, storage, reports, local-calendar policy, and calendar widget should
-need no changes. Linux work belongs at the existing boundaries:
+The model, storage, reports, local-calendar policy and the widgets are the
+same on every system. What differs is behind the boundaries named above, and
+each system does there what its own programs do.
 
-1. Enable eframe's `x11` and/or `wayland` features and add a Linux build job.
-2. Implement the non-Windows `TrayController` in `tray.rs`. Keep hiding and
-   start-minimized behavior disabled unless a usable tray was actually created.
-3. Implement the non-Windows guard in `single_instance.rs`, preferably by
-   locking a separate file beside the data file.
-4. Implement autorun and shortcut behavior in `desktop.rs`. Application paths
-   already use the platform-aware `directories` crate, and opening the folder
-   already uses the cross-platform `open` crate.
-5. Decide whether a taskbar running indicator has a meaningful equivalent. It
-   is optional decoration and must not affect timer behavior.
+Everything is kept in one folder, which `paths.rs` finds: the data, the UI
+persistence and the installed copy of the program. What has to be elsewhere
+for the system to find it, the start at sign-in and the shortcut, is written
+only when the user asks for it and points back into the folder.
 
-Unsupported desktop capabilities should return an explicit error or remain
-disabled in the UI. They should not report success while doing nothing.
+| | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Folder | `%APPDATA%\OptoTracker` | `~/Library/Application Support/OptoTracker` | `~/.local/share/OptoTracker` |
+| Installed copy | `OptoTracker.exe` | `OptoTracker.app`, a bundle | `opto-tracker` |
+| Start at sign-in | `Run` value in the registry | launch agent | desktop entry in the autostart folder |
+| Shortcut | `.lnk` on the desktop | link on the desktop | desktop entry in the applications menu |
+| Tray | notification area | menu bar | StatusNotifierItem over D-Bus |
+| Running indicator | taskbar overlay | Dock badge | the icon of the window |
+| Single instance | named mutex | file lock, and a socket to ask for the window | the same |
+| Theme of the system | told to the window | told to the window | settings portal over D-Bus |
+
+- `desktop.rs` holds what the systems share and one file per system in
+  `desktop/`. The texts in `i18n.rs` that name a system, or that only one
+  system says, are given once per system with `#[cfg]`.
+- `tray.rs` is one implementation on the `tray-icon` crate. On Linux that
+  crate speaks D-Bus by itself, so the executable needs no GTK. A desktop
+  without a tray is not an error there: the window then closes for real.
+- macOS expects an application to be a bundle. The executable writes its own
+  (`--bundle`, and "Install" in Settings), with an icon that it draws, so
+  that a release needs no packaging tools and no files beside the sources.
+- A window of Wayland cannot leave the screen and come back, which sending
+  it to the tray comes down to. On Linux the window is therefore opened with
+  X11 where that is offered, and with Wayland only where it is not.
+- The fonts are those of the system: a list of files on Windows and macOS,
+  and whatever fontconfig names on Linux. The rows of the timer and of the
+  entries measure the clock in the font that was found, since the digits of
+  the systems differ in width.
+
+Hiding and start-minimized behavior stay disabled unless a usable tray was
+actually created. Unsupported desktop capabilities should return an explicit
+error or remain disabled in the UI. They should not report success while doing
+nothing.

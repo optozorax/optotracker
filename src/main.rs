@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDate};
@@ -60,6 +62,11 @@ const SHARE_BAR_SIZE: egui::Vec2 = egui::vec2(56.0, 6.0);
 // Room for everything to the right of a row's two drop-downs.
 const TIMER_CONTROLS_WIDTH: f32 = 264.0;
 const ENTRY_CONTROLS_WIDTH: f32 = 292.0;
+// How wide "00:00:00" is at most in the font of Windows, which the two
+// widths above were measured with: in the timer and in an entry. A font with
+// wider digits is given the difference on top of them.
+const TIMER_CLOCK_WIDTH: f32 = 100.0;
+const ENTRY_CLOCK_WIDTH: f32 = 64.0;
 const MIN_SELECTOR_WIDTH: f32 = 110.0;
 const MAX_SELECTOR_WIDTH: f32 = 300.0;
 const CALENDAR_PAGE_WEEKS: i32 = 13;
@@ -78,10 +85,20 @@ fn main() -> eframe::Result {
     if let Ok(paths) = &app_paths {
         i18n::set_language(remembered_language(&paths.persistence));
     }
-    let _instance_guard = match single_instance::SingleInstanceGuard::acquire() {
+    // Packaging starts nothing, so it comes before everything that does.
+    #[cfg(target_os = "macos")]
+    if write_requested_bundle() {
+        return Ok(());
+    }
+    let directory = app_paths.as_ref().ok().map(|paths| &*paths.directory);
+    let instance_guard = match single_instance::SingleInstanceGuard::acquire(directory) {
         Ok(Some(guard)) => guard,
         Ok(None) => {
-            single_instance::SingleInstanceGuard::show_already_running_message();
+            // The copy that runs is asked for its window where that is
+            // possible, and pointed to where it is not.
+            if !single_instance::SingleInstanceGuard::show_running_instance(directory) {
+                single_instance::SingleInstanceGuard::show_already_running_message();
+            }
             return Ok(());
         }
         Err(error) => {
@@ -119,16 +136,29 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     };
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("OptoTracker")
+        .with_icon(if cfg!(target_os = "macos") {
+            // The Dock shows the icon of the bundle, which has a picture for
+            // every size. An empty icon leaves it in place.
+            egui::IconData::default()
+        } else {
+            app_icon::icon_data(false)
+        })
+        .with_visible(true)
+        .with_inner_size([720.0, 620.0])
+        .with_min_inner_size([420.0, 320.0]);
+    // What a desktop of Linux finds the entry in its menu by, and with it
+    // the icon, for a window that is open.
+    #[cfg(target_os = "linux")]
+    let viewport = viewport.with_app_id(desktop::APP_ID);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("OptoTracker")
-            .with_icon(app_icon::icon_data(false))
-            .with_visible(true)
-            .with_inner_size([720.0, 620.0])
-            .with_min_inner_size([420.0, 320.0]),
+        viewport,
         persistence_path: Some(app_paths.persistence.clone()),
+        event_loop_builder: desktop::event_loop_builder(),
         ..Default::default()
     };
+    let instance_guard = &instance_guard;
     eframe::run_native(
         "OptoTracker",
         options,
@@ -141,10 +171,36 @@ fn main() -> eframe::Result {
                 app_paths.clone(),
                 cc.storage,
                 start_minimized,
+                instance_guard,
                 &cc.egui_ctx,
             )))
         }),
     )
+}
+
+/// `--bundle FOLDER` writes the application into the folder as
+/// `OptoTracker.app` and does nothing else. Says whether that was asked for.
+#[cfg(target_os = "macos")]
+fn write_requested_bundle() -> bool {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments
+        .next()
+        .is_none_or(|argument| argument != "--bundle")
+    {
+        return false;
+    }
+    let (Some(folder), None) = (arguments.next(), arguments.next()) else {
+        eprintln!("{}", tr().usage);
+        std::process::exit(2);
+    };
+    match desktop::bundle_into(Path::new(&folder)) {
+        Ok(bundle) => println!("{}", bundle.display()),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
+    true
 }
 
 /// The language that an earlier run was left in. What is said before the
@@ -187,16 +243,9 @@ fn configure_fonts(ctx: &egui::Context) {
     // The system's UI font is easier to read at small sizes than egui's light
     // default, which remains the fallback for icons and for systems without
     // these files.
-    let regular = load_font(&mut fonts, "regular", &[r"C:\Windows\Fonts\segoeui.ttf"]);
-    let semibold = load_font(
-        &mut fonts,
-        "semibold",
-        &[
-            r"C:\Windows\Fonts\seguisb.ttf",
-            r"C:\Windows\Fonts\segoeuib.ttf",
-            r"C:\Windows\Fonts\arialbd.ttf",
-        ],
-    );
+    let system = desktop::system_fonts();
+    let regular = load_font(&mut fonts, "regular", &system.regular);
+    let semibold = load_font(&mut fonts, "semibold", &system.semibold);
 
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     if let Some(regular) = regular {
@@ -210,13 +259,25 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Registers the first font file that can be read and returns its name.
-fn load_font(fonts: &mut FontDefinitions, name: &str, paths: &[&str]) -> Option<String> {
-    let bytes = paths.iter().find_map(|path| fs::read(path).ok())?;
-    fonts.font_data.insert(
-        name.to_owned(),
-        std::sync::Arc::new(FontData::from_owned(bytes)),
-    );
+/// Registers the first font that can be read and returns its name.
+fn load_font(
+    fonts: &mut FontDefinitions,
+    name: &str,
+    candidates: &[desktop::SystemFont],
+) -> Option<String> {
+    let (font, bytes) = candidates.iter().find_map(|font| {
+        let bytes = fs::read(&font.path).ok()?;
+        // egui stops the application over a file that it cannot read as a
+        // font, so the file is tried with the reader that egui uses.
+        let readable = skrifa::FontRef::from_index(&bytes, font.index).is_ok();
+        readable.then_some((font, bytes))
+    })?;
+    let mut data = FontData::from_owned(bytes);
+    data.index = font.index;
+    if let Some(weight) = font.weight {
+        data.tweak.coords = egui::epaint::text::VariationCoords::new([("wght", weight)]);
+    }
+    fonts.font_data.insert(name.to_owned(), Arc::new(data));
     Some(name.to_owned())
 }
 
@@ -239,25 +300,7 @@ fn semibold(text: impl Into<String>) -> RichText {
 /// a running clock would change its width every second and push around
 /// whatever is laid out next to it.
 fn tabular_digits(ui: &mut egui::Ui, text: &str, font: FontId, color: Color32) -> egui::Response {
-    // Whole pixels keep the slots evenly spaced after text is snapped to them.
-    let pixels_per_point = ui.pixels_per_point();
-    let whole_pixels = |width: f32| (width * pixels_per_point).ceil() / pixels_per_point;
-    let (widths, height) = ui.fonts_mut(|fonts| {
-        let digit_width = ('0'..='9')
-            .map(|digit| fonts.glyph_width(&font, digit))
-            .fold(0.0, f32::max);
-        let widths: Vec<f32> = text
-            .chars()
-            .map(|character| {
-                whole_pixels(if character.is_ascii_digit() {
-                    digit_width
-                } else {
-                    fonts.glyph_width(&font, character)
-                })
-            })
-            .collect();
-        (widths, fonts.row_height(&font))
-    });
+    let (widths, height) = tabular_widths(ui, text, &font);
 
     let size = egui::vec2(widths.iter().sum(), height);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -275,6 +318,37 @@ fn tabular_digits(ui: &mut egui::Ui, text: &str, font: FontId, color: Color32) -
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), text));
     response
+}
+
+/// The slot of every character of `text` as [`tabular_digits`] shows it, and
+/// the height of the row.
+fn tabular_widths(ui: &egui::Ui, text: &str, font: &FontId) -> (Vec<f32>, f32) {
+    // Whole pixels keep the slots evenly spaced after text is snapped to them.
+    let pixels_per_point = ui.pixels_per_point();
+    let whole_pixels = |width: f32| (width * pixels_per_point).ceil() / pixels_per_point;
+    ui.fonts_mut(|fonts| {
+        let digit_width = ('0'..='9')
+            .map(|digit| fonts.glyph_width(font, digit))
+            .fold(0.0, f32::max);
+        let widths: Vec<f32> = text
+            .chars()
+            .map(|character| {
+                whole_pixels(if character.is_ascii_digit() {
+                    digit_width
+                } else {
+                    fonts.glyph_width(font, character)
+                })
+            })
+            .collect();
+        (widths, fonts.row_height(font))
+    })
+}
+
+/// What a clock in `font` needs beyond the `expected` width that the row
+/// around it was laid out for.
+fn wider_clock(ui: &egui::Ui, font: FontId, expected: f32) -> f32 {
+    let width: f32 = tabular_widths(ui, "00:00:00", &font).0.iter().sum();
+    (width - expected).max(0.0)
 }
 
 /// A caption and a duration at the right edge of a row.
@@ -419,6 +493,12 @@ struct TimeTrackerApp {
     /// Whether the title bar was last told to keep a theme of its own.
     window_keeps_theme: Option<bool>,
     tray: Option<tray::TrayController>,
+    /// Whether the window can be sent to the tray: there is a tray, and the
+    /// window can leave the screen and come back.
+    hides_to_tray: bool,
+    /// Set from outside the interface when the window is asked for: by
+    /// another copy that was started, or by a click on the icon in the Dock.
+    show_requested: Arc<AtomicBool>,
     exit_requested: bool,
     window_hidden: bool,
     preferences: PersistedSettings,
@@ -433,6 +513,7 @@ impl TimeTrackerApp {
         app_paths: AppPaths,
         storage: Option<&dyn eframe::Storage>,
         start_minimized: bool,
+        instance_guard: &single_instance::SingleInstanceGuard,
         ctx: &egui::Context,
     ) -> Self {
         let remembered = ctx
@@ -444,6 +525,10 @@ impl TimeTrackerApp {
         let preferences: PersistedSettings = storage
             .and_then(|storage| eframe::get_value(storage, SETTINGS_KEY))
             .unwrap_or_default();
+        desktop::watch_system_theme({
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        });
         ctx.set_theme(preferences.theme);
         // Before anything is worded, the menu of the tray icon included.
         i18n::set_language(preferences.language);
@@ -454,13 +539,28 @@ impl TimeTrackerApp {
         });
         let message = match &tray {
             Ok(_) => String::new(),
+            // A desktop of Linux without a tray is nothing out of the
+            // ordinary. Settings says what follows from it.
+            Err(_) if cfg!(target_os = "linux") => String::new(),
             Err(error) => format!("{}: {error}", tr().tray_not_created),
         };
         let tray = tray.ok();
-        let window_hidden = start_minimized && tray.is_some();
+        let hides_to_tray = tray.is_some() && desktop::window_can_hide();
+        let window_hidden = start_minimized && hides_to_tray;
         if window_hidden {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
+        let show_requested = Arc::new(AtomicBool::new(false));
+        let request_show = {
+            let show_requested = Arc::clone(&show_requested);
+            let ctx = ctx.clone();
+            move || {
+                show_requested.store(true, Ordering::Relaxed);
+                ctx.request_repaint();
+            }
+        };
+        instance_guard.on_second_instance(request_show.clone());
+        desktop::on_reopen(request_show);
         let autorun_enabled = desktop::autorun_enabled();
         if autorun_enabled {
             let _ = desktop::set_autorun(&app_paths, true, preferences.start_minimized_on_autorun);
@@ -488,6 +588,8 @@ impl TimeTrackerApp {
             last_icon_running: None,
             window_keeps_theme: None,
             tray,
+            hides_to_tray,
+            show_requested,
             exit_requested: false,
             window_hidden,
             preferences,
@@ -575,7 +677,7 @@ impl TimeTrackerApp {
         let projects = project_options(&self.store);
         let layout = RowLayout::new(
             ui.available_width(),
-            TIMER_CONTROLS_WIDTH,
+            TIMER_CONTROLS_WIDTH + wider_clock(ui, semibold_font(24.0), TIMER_CLOCK_WIDTH),
             ui.spacing().item_spacing.x,
         );
         let can_start = !activities.is_empty();
@@ -712,6 +814,7 @@ impl TimeTrackerApp {
     }
 
     fn entries_panel(&mut self, ui: &mut egui::Ui) {
+        let wider_entry_clock = wider_clock(ui, semibold_font(15.0), ENTRY_CLOCK_WIDTH);
         let entry_count = self.store.time_entries.len();
         let current_time = now();
         let activities = activity_options(&self.store, current_time);
@@ -1048,7 +1151,7 @@ impl TimeTrackerApp {
                             let frame = entry_frame().show(ui, |ui| {
                                 let layout = RowLayout::new(
                                     ui.available_width(),
-                                    ENTRY_CONTROLS_WIDTH,
+                                    ENTRY_CONTROLS_WIDTH + wider_entry_clock,
                                     ui.spacing().item_spacing.x,
                                 );
                                 let mut controls = None;
@@ -1441,9 +1544,9 @@ impl TimeTrackerApp {
             }
             if self.preferences.theme == egui::ThemePreference::System {
                 let app_mode = match ui.ctx().system_theme() {
-                    Some(egui::Theme::Dark) => tr().follows_dark_windows,
-                    Some(egui::Theme::Light) => tr().follows_light_windows,
-                    None => tr().follows_unknown_windows,
+                    Some(egui::Theme::Dark) => tr().follows_dark_system,
+                    Some(egui::Theme::Light) => tr().follows_light_system,
+                    None => tr().follows_unknown_system,
                 };
                 ui.label(RichText::new(app_mode).small().color(palette(ui).muted));
             }
@@ -1507,7 +1610,7 @@ impl TimeTrackerApp {
             if desktop::is_installed(&self.app_paths) {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(tr().installed_executable);
-                    ui.label(RichText::new(paths::EXECUTABLE_FILE).monospace());
+                    ui.label(RichText::new(paths::INSTALLED_APPLICATION).monospace());
                 });
             } else {
                 ui.label(tr().not_installed);
@@ -1530,7 +1633,7 @@ impl TimeTrackerApp {
 
         ui.add_space(8.0);
         card(ui, |ui| {
-            section_title(ui, tr().windows_behavior);
+            section_title(ui, tr().system_behavior);
             ui.add_space(4.0);
 
             let mut autorun = self.autorun_enabled;
@@ -1584,19 +1687,30 @@ impl TimeTrackerApp {
 
             ui.add_space(6.0);
             ui.add_enabled(
-                self.tray.is_some(),
+                self.hides_to_tray,
                 egui::Checkbox::new(
                     &mut self.preferences.close_or_minimize_to_tray,
                     tr().to_tray,
                 ),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
-            ui.label(
-                RichText::new(tr().to_tray_note)
-                    .small()
-                    .color(palette(ui).muted),
-            );
+            #[cfg(target_os = "linux")]
+            let note = if self.hides_to_tray {
+                tr().to_tray_note
+            } else {
+                tr().to_tray_unavailable
+            };
+            #[cfg(not(target_os = "linux"))]
+            let note = tr().to_tray_note;
+            ui.label(RichText::new(note).small().color(palette(ui).muted));
         });
+    }
+
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.window_hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Puts the interface into the language that was just chosen.
@@ -1614,19 +1728,16 @@ impl TimeTrackerApp {
     }
 
     fn handle_window_and_tray(&mut self, ctx: &egui::Context) {
-        if let Some(action) = self.tray.as_ref().and_then(|tray| tray.poll_action()) {
-            match action {
-                tray::TrayAction::Show => {
-                    self.window_hidden = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                tray::TrayAction::Exit => {
-                    self.exit_requested = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+        let show_requested = self.show_requested.swap(false, Ordering::Relaxed);
+        let action = self.tray.as_ref().and_then(|tray| tray.poll_action());
+        match action {
+            Some(tray::TrayAction::Exit) => {
+                self.exit_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            Some(tray::TrayAction::Show) => self.show_window(ctx),
+            None if show_requested => self.show_window(ctx),
+            None => {}
         }
 
         let (close_requested, minimized) = ctx.input(|input| {
@@ -1635,13 +1746,15 @@ impl TimeTrackerApp {
                 input.viewport().minimized == Some(true),
             )
         });
-        if self.preferences.close_or_minimize_to_tray && self.tray.is_some() && !self.exit_requested
+        if self.preferences.close_or_minimize_to_tray && self.hides_to_tray && !self.exit_requested
         {
+            // A minimized window of macOS has its place in the Dock.
+            let minimizes_to_tray = !cfg!(target_os = "macos");
             if close_requested {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 self.window_hidden = true;
-            } else if minimized && !self.window_hidden {
+            } else if minimized && !self.window_hidden && minimizes_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 self.window_hidden = true;
@@ -1671,7 +1784,7 @@ impl eframe::App for TimeTrackerApp {
         let running = self.store.active_entry.is_some();
         if self.last_icon_running != Some(running) {
             ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(
+                .send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(
                     app_icon::icon_data(running),
                 ))));
             app_icon::set_taskbar_running(frame, running);
@@ -1759,6 +1872,13 @@ impl eframe::App for TimeTrackerApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, SETTINGS_KEY, &self.preferences);
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // For a system whose windows are not told its theme.
+        if let Some(theme) = desktop::system_theme() {
+            raw_input.system_theme = Some(theme);
+        }
     }
 
     fn auto_save_interval(&self) -> Duration {

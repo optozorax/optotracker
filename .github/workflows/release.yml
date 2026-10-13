@@ -1,4 +1,5 @@
-# Builds OptoTracker for Windows and publishes it as a GitHub release.
+# Builds OptoTracker for Windows, macOS and Linux and publishes it as a GitHub
+# release.
 #
 # To make a release:
 #
@@ -9,12 +10,16 @@
 #          git tag v0.1.0
 #          git push origin v0.1.0
 #
-# The release appears with `OptoTracker.exe` attached and notes made from the
-# commits since the previous tag.
+# The release appears with one file for each system attached and notes made
+# from the commits since the previous tag:
+#
+#   OptoTracker.exe                    Windows
+#   OptoTracker-macos.zip              macOS, for Apple and Intel processors
+#   OptoTracker-linux-x86_64.tar.gz    Linux
 #
 # The workflow can also be started by hand from the Actions tab. That run tests
-# and builds in the same way and keeps the executable as an artifact of the
-# run, without publishing anything.
+# and builds in the same way and keeps the files as artifacts of the run,
+# without publishing anything.
 name: Release
 
 on:
@@ -45,6 +50,7 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
 
+      # Checked in one of the builds only: the release needs all of them.
       - name: Check that the tag is the version in Cargo.toml
         if: github.ref_type == 'tag'
         run: |
@@ -73,27 +79,151 @@ jobs:
           path: dist/OptoTracker.exe
           if-no-files-found: error
 
+  macos:
+    name: Build for macOS
+    # A runner with an Apple processor, which also builds for Intel ones.
+    runs-on: macos-latest
+    timeout-minutes: 40
+    env:
+      # The oldest macOS that the application starts on. Info.plist, which
+      # the application writes for its bundle, says the same.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          rustup default stable
+
+      - name: Test
+        run: cargo test --release --locked --target aarch64-apple-darwin
+
+      - name: Build
+        run: |
+          cargo build --release --locked \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+
+      # One executable for both processors. It writes its own bundle, the
+      # same one that "Install" in its settings makes, with the icon and
+      # Info.plist. Signing the bundle without an identity does not make it
+      # trusted, but macOS calls a download without any signature damaged.
+      - name: Make the application
+        run: |
+          mkdir dist
+          lipo -create -output dist/OptoTracker \
+            target/aarch64-apple-darwin/release/opto-tracker \
+            target/x86_64-apple-darwin/release/opto-tracker
+          dist/OptoTracker --bundle dist
+          rm dist/OptoTracker
+          codesign --force --sign - dist/OptoTracker.app
+          codesign --verify --strict --verbose=2 dist/OptoTracker.app
+          lipo -archs dist/OptoTracker.app/Contents/MacOS/OptoTracker
+
+      # Nothing else runs the application on a Mac before it is released, so
+      # one that does not stay up stops the release, and the page of the run
+      # says what it printed. A picture of the screen is kept with the run.
+      - name: Start the application once
+        run: |
+          mkdir -p "$RUNNER_TEMP/home"
+          HOME="$RUNNER_TEMP/home" dist/OptoTracker.app/Contents/MacOS/OptoTracker > start.log 2>&1 &
+          application=$!
+          sleep 15
+          screencapture -x screen.png || true
+          if kill -0 "$application" 2>/dev/null; then
+            echo "OptoTracker kept running."
+            kill "$application"
+          else
+            cat start.log
+            printed="$(tail -c 1500 start.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            echo "::error title=OptoTracker did not keep running on the macOS runner::$printed"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-screen
+          path: screen.png
+          if-no-files-found: ignore
+
+      # In a zip of its own, which keeps the permission to execute that an
+      # artifact would drop.
+      - name: Pack the application
+        run: ditto -c -k --keepParent dist/OptoTracker.app dist/OptoTracker-macos.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OptoTracker-macos
+          path: dist/OptoTracker-macos.zip
+          if-no-files-found: error
+
+  linux:
+    name: Build for Linux
+    runs-on: ubuntu-latest
+    # An executable needs at least the C library that it was built with, and
+    # the runner has a recent one. This image exists for building what has to
+    # start on older systems too: its C library is glibc 2.28, of 2018, and
+    # the compiler is already in it, so nothing has to be installed first.
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # In an archive, which keeps the permission to execute that a plain
+      # download would drop.
+      - name: Pack the executable
+        run: |
+          mkdir dist
+          tar --create --gzip --file dist/OptoTracker-linux-x86_64.tar.gz \
+            --directory target/release opto-tracker
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OptoTracker-linux
+          path: dist/OptoTracker-linux-x86_64.tar.gz
+          if-no-files-found: error
+
   # A separate job, so that only this one may write to the repository: nothing
-  # that runs during the build gets a token that could change a release.
+  # that runs during the builds gets a token that could change a release.
   publish:
     name: Publish the release
     if: github.ref_type == 'tag'
-    needs: windows
+    needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      # Every file into the working directory, without a folder per artifact.
       - uses: actions/download-artifact@v8
         with:
-          name: OptoTracker-windows
+          pattern: OptoTracker-*
+          merge-multiple: true
 
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" OptoTracker.exe \
+          gh release create "$GITHUB_REF_NAME" \
+            OptoTracker.exe OptoTracker-macos.zip OptoTracker-linux-x86_64.tar.gz \
             --title "OptoTracker ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             --verify-tag

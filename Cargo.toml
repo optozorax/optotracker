@@ -1,6 +1,6 @@
 [package]
 name = "opto-tracker"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -14,6 +14,8 @@ open = "5"
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The reader of fonts that egui uses, to tell whether it will accept a file.
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 thiserror = "2"
 
 [build-dependencies]
@@ -31,3 +33,30 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSDockTile",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
+    "NSString",
+] }
+png = "0.18"
+tray-icon = "0.25.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Both windowing systems, and a tray icon that speaks D-Bus by itself, so that
+# the executable needs neither GTK nor an indicator library to be installed.
+eframe = { version = "0.36.2", default-features = false, features = ["wayland", "x11"] }
+libloading = "0.8"
+png = "0.18"
+tray-icon = { version = "0.25.1", default-features = false, features = ["ksni"] }
+winit = { version = "0.30.13", default-features = false, features = ["x11"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }

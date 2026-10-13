@@ -36,60 +36,71 @@ pub fn paint(painter: &egui::Painter, rect: Rect, running: bool) {
     }
 }
 
+/// The sides of the squares that the two icons are designed in.
+const ICON_DESIGN: f32 = 64.0;
+const TRAY_DESIGN: f32 = 32.0;
+
 pub fn icon_data(running: bool) -> IconData {
-    const SIZE: usize = 64;
-    const SAMPLES: usize = 4;
-    let mut rgba = vec![0; SIZE * SIZE * 4];
-
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let mut sum = [0_u32; 4];
-            for sample_y in 0..SAMPLES {
-                for sample_x in 0..SAMPLES {
-                    let px = x as f32 + (sample_x as f32 + 0.5) / SAMPLES as f32;
-                    let py = y as f32 + (sample_y as f32 + 0.5) / SAMPLES as f32;
-                    let color = sample_icon(px, py, running);
-                    for channel in 0..4 {
-                        sum[channel] += color[channel] as u32;
-                    }
-                }
-            }
-            let offset = (y * SIZE + x) * 4;
-            let divisor = (SAMPLES * SAMPLES) as u32;
-            for channel in 0..4 {
-                rgba[offset + channel] = (sum[channel] / divisor) as u8;
-            }
-        }
-    }
-
-    IconData {
-        rgba,
-        width: SIZE as u32,
-        height: SIZE as u32,
-    }
+    render(64, ICON_DESIGN, |x, y| sample_icon(x, y, running))
 }
 
-/// A simplified, edge-to-edge variant that stays legible after Windows scales
-/// it down to the notification area's 16–20 physical pixels.
+/// A simplified, edge-to-edge variant that stays legible after it is scaled
+/// down to the 16–24 pixels of a notification area or a menu bar.
 pub fn tray_icon_data(running: bool) -> IconData {
-    const SIZE: usize = 32;
-    const SAMPLES: usize = 4;
-    let mut rgba = vec![0; SIZE * SIZE * 4];
+    // The menu bar of macOS shows it 18 points high, which is 36 pixels of
+    // most of its screens.
+    let size = if cfg!(target_os = "macos") { 64 } else { 32 };
+    render(size, TRAY_DESIGN, |x, y| sample_tray_icon(x, y, running))
+}
 
-    for y in 0..SIZE {
-        for x in 0..SIZE {
+/// The icon as a picture of any size, for the files that a desktop shows it
+/// from.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn application_icon(size: u32) -> IconData {
+    // The icons of macOS leave about a tenth of their square empty on every
+    // side, so the tile is drawn smaller there to match its neighbours.
+    let zoom = if cfg!(target_os = "macos") { 0.92 } else { 1.0 };
+    let center = ICON_DESIGN / 2.0;
+    let zoomed = |coordinate: f32| (coordinate - center) / zoom + center;
+    render(size as usize, ICON_DESIGN, |x, y| {
+        sample_icon(zoomed(x), zoomed(y), false)
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn png(icon: &IconData) -> Result<Vec<u8>, String> {
+    let mut file = Vec::new();
+    let mut encoder = png::Encoder::new(&mut file, icon.width, icon.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(&icon.rgba))
+        .map_err(|error| error.to_string())?;
+    Ok(file)
+}
+
+/// Draws a square icon of `size` pixels. `sample` colors the points of the
+/// square of `design` units that the icon was designed in.
+fn render(size: usize, design: f32, sample: impl Fn(f32, f32) -> [u8; 4]) -> IconData {
+    const SAMPLES: usize = 4;
+    let scale = design / size as f32;
+    let mut rgba = vec![0; size * size * 4];
+
+    for y in 0..size {
+        for x in 0..size {
             let mut sum = [0_u32; 4];
             for sample_y in 0..SAMPLES {
                 for sample_x in 0..SAMPLES {
-                    let px = x as f32 + (sample_x as f32 + 0.5) / SAMPLES as f32;
-                    let py = y as f32 + (sample_y as f32 + 0.5) / SAMPLES as f32;
-                    let color = sample_tray_icon(px, py, running);
+                    let px = (x as f32 + (sample_x as f32 + 0.5) / SAMPLES as f32) * scale;
+                    let py = (y as f32 + (sample_y as f32 + 0.5) / SAMPLES as f32) * scale;
+                    let color = sample(px, py);
                     for channel in 0..4 {
                         sum[channel] += color[channel] as u32;
                     }
                 }
             }
-            let offset = (y * SIZE + x) * 4;
+            let offset = (y * size + x) * 4;
             let divisor = (SAMPLES * SAMPLES) as u32;
             for channel in 0..4 {
                 rgba[offset + channel] = (sum[channel] / divisor) as u8;
@@ -99,8 +110,8 @@ pub fn tray_icon_data(running: bool) -> IconData {
 
     IconData {
         rgba,
-        width: SIZE as u32,
-        height: SIZE as u32,
+        width: size as u32,
+        height: size as u32,
     }
 }
 
@@ -249,7 +260,27 @@ pub fn set_taskbar_running(frame: &eframe::Frame, running: bool) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// The Dock has no icon to lay over another, so the running timer is a badge
+/// on the icon of the application there.
+#[cfg(target_os = "macos")]
+pub fn set_taskbar_running(_frame: &eframe::Frame, running: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::NSString;
+
+    // The interface is drawn on the main thread, the only one that may talk
+    // to the application.
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
+    let badge = running.then(|| NSString::from_str("●"));
+    NSApplication::sharedApplication(main_thread)
+        .dockTile()
+        .setBadgeLabel(badge.as_deref());
+}
+
+/// Elsewhere the icon of the window is all that a taskbar shows.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn set_taskbar_running(_frame: &eframe::Frame, _running: bool) {}
 
 #[cfg(target_os = "windows")]

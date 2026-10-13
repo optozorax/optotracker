@@ -64,22 +64,26 @@ pub fn tr() -> &'static Texts {
 
 /// Declares [`Texts`] and fills it in for every language, from lines of the
 /// form `name: "English", "Russian";`.
+///
+/// A line may be preceded by `#[cfg(...)]`. That is how a text that names
+/// the system, or that only one of the systems needs, is given once for each
+/// of them.
 macro_rules! texts {
-    ($($name:ident: $english:literal, $russian:literal;)*) => {
+    ($($(#[$system:meta])* $name:ident: $english:literal, $russian:literal;)*) => {
         /// The texts of one language.
         pub struct Texts {
             language: Language,
-            $(pub $name: &'static str,)*
+            $($(#[$system])* pub $name: &'static str,)*
         }
 
         static ENGLISH: Texts = Texts {
             language: Language::English,
-            $($name: $english,)*
+            $($(#[$system])* $name: $english,)*
         };
 
         static RUSSIAN: Texts = Texts {
             language: Language::Russian,
-            $($name: $russian,)*
+            $($(#[$system])* $name: $russian,)*
         };
     };
 }
@@ -113,8 +117,18 @@ texts! {
         "Save failed; change was reverted",
         "Не удалось сохранить; изменение отменено";
     entry_gone: "The entry no longer exists", "Запись больше не существует";
+    #[cfg(not(target_os = "macos"))]
     tray_not_created: "Could not create tray icon", "Не удалось создать значок в трее";
+    #[cfg(target_os = "macos")]
+    tray_not_created:
+        "Could not create the menu bar icon",
+        "Не удалось создать значок в строке меню";
+    #[cfg(not(target_os = "macos"))]
     tray_not_updated: "Could not update tray icon", "Не удалось обновить значок в трее";
+    #[cfg(target_os = "macos")]
+    tray_not_updated:
+        "Could not update the menu bar icon",
+        "Не удалось обновить значок в строке меню";
 
     // The calendar.
     earlier: "Earlier", "Раньше";
@@ -230,18 +244,50 @@ texts! {
     appearance: "Appearance", "Внешний вид";
     language_label: "Language:", "Язык:";
     theme_label: "Theme:", "Тема:";
+    #[cfg(target_os = "windows")]
     theme_system: "Same as Windows", "Как в Windows";
+    #[cfg(target_os = "macos")]
+    theme_system: "Same as macOS", "Как в macOS";
+    #[cfg(target_os = "linux")]
+    theme_system: "Same as the system", "Как в системе";
     theme_light: "Light", "Светлая";
     theme_dark: "Dark", "Тёмная";
-    follows_dark_windows:
+    #[cfg(target_os = "windows")]
+    follows_dark_system:
         "Follows the app mode in the color settings of Windows, which is dark now.",
         "Следует режиму приложений в настройках цветов Windows; сейчас он тёмный.";
-    follows_light_windows:
+    #[cfg(target_os = "windows")]
+    follows_light_system:
         "Follows the app mode in the color settings of Windows, which is light now.",
         "Следует режиму приложений в настройках цветов Windows; сейчас он светлый.";
-    follows_unknown_windows:
+    #[cfg(target_os = "windows")]
+    follows_unknown_system:
         "Follows the app mode in the color settings of Windows, which could not be read.",
         "Следует режиму приложений в настройках цветов Windows, но определить его не удалось.";
+    #[cfg(target_os = "macos")]
+    follows_dark_system:
+        "Follows the appearance in the settings of macOS, which is dark now.",
+        "Следует оформлению в настройках macOS; сейчас оно тёмное.";
+    #[cfg(target_os = "macos")]
+    follows_light_system:
+        "Follows the appearance in the settings of macOS, which is light now.",
+        "Следует оформлению в настройках macOS; сейчас оно светлое.";
+    #[cfg(target_os = "macos")]
+    follows_unknown_system:
+        "Follows the appearance in the settings of macOS, which could not be read.",
+        "Следует оформлению в настройках macOS, но определить его не удалось.";
+    #[cfg(target_os = "linux")]
+    follows_dark_system:
+        "Follows the color scheme of the desktop, which is dark now.",
+        "Следует цветовой схеме рабочего стола; сейчас она тёмная.";
+    #[cfg(target_os = "linux")]
+    follows_light_system:
+        "Follows the color scheme of the desktop, which is light now.",
+        "Следует цветовой схеме рабочего стола; сейчас она светлая.";
+    #[cfg(target_os = "linux")]
+    follows_unknown_system:
+        "Follows the color scheme of the desktop, which could not be read.",
+        "Следует цветовой схеме рабочего стола, но определить её не удалось.";
     application_folder: "Application folder", "Папка приложения";
     application_folder_note:
         "The installed executable and UI persistence are stored in this folder.",
@@ -250,8 +296,16 @@ texts! {
     install_here: "Install OptoTracker here", "Установить OptoTracker сюда";
     installed: "OptoTracker was installed.", "OptoTracker установлен.";
     open_folder: "Open folder", "Открыть папку";
+    #[cfg(not(target_os = "linux"))]
     create_shortcut: "Create desktop shortcut", "Создать ярлык на рабочем столе";
+    #[cfg(not(target_os = "linux"))]
     shortcut_created: "Desktop shortcut created.", "Ярлык на рабочем столе создан.";
+    #[cfg(target_os = "linux")]
+    create_shortcut: "Add to the applications menu", "Добавить в меню приложений";
+    #[cfg(target_os = "linux")]
+    shortcut_created:
+        "OptoTracker was added to the applications menu.",
+        "OptoTracker добавлен в меню приложений.";
     installed_executable: "Installed executable:", "Установленный исполняемый файл:";
     not_installed:
         "OptoTracker is not installed in this folder yet.",
@@ -259,31 +313,80 @@ texts! {
     data: "Data:", "Данные:";
     persistence: "Persistence:", "Состояние интерфейса:";
     weekly_backups: "Weekly backups:", "Еженедельные резервные копии:";
-    windows_behavior: "Windows behavior", "Поведение в Windows";
+    #[cfg(target_os = "windows")]
+    system_behavior: "Windows behavior", "Поведение в Windows";
+    #[cfg(target_os = "macos")]
+    system_behavior: "macOS behavior", "Поведение в macOS";
+    #[cfg(target_os = "linux")]
+    system_behavior: "Linux behavior", "Поведение в Linux";
     autorun: "Start OptoTracker when I sign in", "Запускать OptoTracker при входе в систему";
+    #[cfg(target_os = "windows")]
     autorun_enabled: "Windows autorun enabled.", "Автозапуск Windows включён.";
+    #[cfg(target_os = "windows")]
     autorun_disabled: "Windows autorun disabled", "Автозапуск Windows отключён";
+    #[cfg(not(target_os = "windows"))]
+    autorun_enabled: "Autorun enabled.", "Автозапуск включён.";
+    #[cfg(not(target_os = "windows"))]
+    autorun_disabled: "Autorun disabled", "Автозапуск отключён";
+    #[cfg(not(target_os = "macos"))]
     autorun_minimized: "Start minimized to tray on autorun", "При автозапуске сворачивать в трей";
+    #[cfg(target_os = "macos")]
+    autorun_minimized:
+        "Start in the menu bar on autorun, without a window",
+        "При автозапуске оставаться в строке меню, без окна";
     autorun_updated: "Autorun behavior updated.", "Параметры автозапуска обновлены.";
+    #[cfg(not(target_os = "macos"))]
     to_tray:
         "Send OptoTracker to the tray when closed or minimized",
         "Убирать OptoTracker в трей при закрытии и сворачивании";
+    #[cfg(not(target_os = "macos"))]
     to_tray_note:
         "When disabled, minimizing behaves normally and closing exits the app.",
         "Если отключено, сворачивание работает как обычно, а закрытие завершает приложение.";
+    // A window of macOS is minimized into the Dock, as its users expect.
+    #[cfg(target_os = "macos")]
+    to_tray:
+        "Keep OptoTracker in the menu bar when its window is closed",
+        "Оставлять OptoTracker в строке меню при закрытии окна";
+    #[cfg(target_os = "macos")]
+    to_tray_note:
+        "When disabled, closing the window exits the app.",
+        "Если отключено, закрытие окна завершает приложение.";
+    #[cfg(target_os = "linux")]
+    to_tray_unavailable:
+        "Not available here: this desktop has no system tray, or does not let a window hide.",
+        "Здесь недоступно: на этом рабочем столе нет системного трея или окно нельзя скрыть.";
 
-    // What Windows shows outside the window.
+    // What the system shows outside the window.
     exit: "Exit OptoTracker", "Выйти из OptoTracker";
+    open_app: "Open OptoTracker", "Открыть OptoTracker";
+    #[cfg(not(target_os = "linux"))]
     tray_timer_running: "OptoTracker — timer running", "OptoTracker — таймер запущен";
+    #[cfg(not(target_os = "macos"))]
     timer_running: "Timer running", "Таймер запущен";
+    #[cfg(target_os = "windows")]
     shortcut_description: "Open OptoTracker", "Открыть OptoTracker";
+    #[cfg(not(target_os = "macos"))]
     already_running:
         "OptoTracker is already running. Open it from the system tray.",
         "OptoTracker уже запущен. Откройте его из системного трея.";
+    #[cfg(target_os = "macos")]
+    already_running:
+        "OptoTracker is already running. Open it from the menu bar.",
+        "OptoTracker уже запущен. Откройте его из строки меню.";
     could_not_start: "OptoTracker could not start", "Не удалось запустить OptoTracker";
+    #[cfg(target_os = "windows")]
     usage:
         "Usage: OptoTracker.exe [--minimized] [DATA_FILE]",
         "Использование: OptoTracker.exe [--minimized] [ФАЙЛ_ДАННЫХ]";
+    #[cfg(target_os = "macos")]
+    usage:
+        "Usage: OptoTracker [--minimized] [DATA_FILE]\n       OptoTracker --bundle FOLDER",
+        "Использование: OptoTracker [--minimized] [ФАЙЛ_ДАННЫХ]\n               OptoTracker --bundle ПАПКА";
+    #[cfg(target_os = "linux")]
+    usage:
+        "Usage: opto-tracker [--minimized] [DATA_FILE]",
+        "Использование: opto-tracker [--minimized] [ФАЙЛ_ДАННЫХ]";
 
     // What can go wrong on the desktop. The reason follows after a colon.
     executable_not_found:
@@ -295,33 +398,49 @@ texts! {
     install_failed: "Could not install OptoTracker", "Не удалось установить OptoTracker";
     could_not_create: "Could not create", "Не удалось создать";
     could_not_open: "Could not open", "Не удалось открыть";
+    #[cfg(target_os = "windows")]
     autorun_not_updated:
         "Could not update Windows autorun",
         "Не удалось изменить автозапуск Windows";
+    #[cfg(not(target_os = "windows"))]
+    autorun_not_updated: "Could not update autorun", "Не удалось изменить автозапуск";
+    #[cfg(target_os = "windows")]
     autorun_rejected:
         "Windows rejected the autorun change",
         "Windows отклонила изменение автозапуска";
+    #[cfg(not(target_os = "linux"))]
     desktop_not_found:
         "Could not locate the Desktop folder",
         "Не удалось найти папку рабочего стола";
+    #[cfg(target_os = "windows")]
     desktop_path_unreadable:
         "Could not read the Desktop folder path",
         "Не удалось прочитать путь к папке рабочего стола";
+    #[cfg(not(target_os = "linux"))]
     shortcut_not_created:
         "Could not create a desktop shortcut",
         "Не удалось создать ярлык на рабочем столе";
+    #[cfg(target_os = "linux")]
+    shortcut_not_created:
+        "Could not add OptoTracker to the applications menu",
+        "Не удалось добавить OptoTracker в меню приложений";
+    #[cfg(target_os = "windows")]
     shortcut_target_not_set:
         "Could not set the shortcut target",
         "Не удалось задать объект ярлыка";
+    #[cfg(target_os = "windows")]
     shortcut_folder_not_set:
         "Could not set the shortcut folder",
         "Не удалось задать рабочую папку ярлыка";
+    #[cfg(target_os = "windows")]
     shortcut_description_not_set:
         "Could not set the shortcut description",
         "Не удалось задать описание ярлыка";
+    #[cfg(target_os = "windows")]
     shortcut_icon_not_set:
         "Could not set the shortcut icon",
         "Не удалось задать значок ярлыка";
+    #[cfg(target_os = "windows")]
     shortcut_not_saved:
         "Could not save the desktop shortcut",
         "Не удалось сохранить ярлык на рабочем столе";

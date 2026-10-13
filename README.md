@@ -86,8 +86,9 @@ weekday, the hours of the day you work at, the typical session and your streaks.
 
 ### Light and dark
 
-OptoTracker follows the app mode of Windows, light or dark. To keep one theme
-whatever Windows is set to, choose it in Settings.
+OptoTracker is light or dark as the system is: it follows the app mode of
+Windows, the appearance of macOS and the color scheme of a Linux desktop. To
+keep one theme whatever the system is set to, choose it in Settings.
 
 <p align="center">
   <img src="screenshots/time-entries-dark.png" width="760"
@@ -99,17 +100,31 @@ whatever Windows is set to, choose it in Settings.
 The interface is in English or in Russian. Choose the language in Settings; it
 changes at once.
 
-### Windows integration
+### On your desktop
 
-- Closing or minimizing the window sends OptoTracker to the tray. This can be
-  turned off in Settings.
-- The window, taskbar and tray icons show whether a timer is running.
-- It can start when you sign in, minimized to the tray.
-- Only one copy runs at a time.
+OptoTracker runs on Windows, macOS and Linux, and on each of them it behaves
+the way programs there do.
+
+- Closing the window keeps OptoTracker running: in the tray on Windows and
+  Linux, where minimizing sends it there too, and in the menu bar on macOS.
+  This can be turned off in Settings.
+- The icons show whether a timer is running: those of the window, the taskbar
+  and the tray, and on macOS a badge in the Dock.
+- It can start when you sign in, without showing its window.
+- Only one copy runs at a time. On macOS and Linux, starting it again brings
+  the window of the running copy forward.
 
 ## Your data
 
-Everything you track is in `%APPDATA%\OptoTracker\data.json`:
+Everything OptoTracker keeps is in one folder:
+
+| System  | Application folder                          |
+| ------- | ------------------------------------------- |
+| Windows | `%APPDATA%\OptoTracker`                     |
+| macOS   | `~/Library/Application Support/OptoTracker` |
+| Linux   | `~/.local/share/OptoTracker`                |
+
+Everything you track is in `data.json` there:
 
 ```json
 {
@@ -148,7 +163,7 @@ OptoTracker is careful with this file:
 
 - Every change is checked and written immediately, and the file is replaced in
   one step, so a crash cannot leave half of it behind.
-- Once a week the file is copied to `backups\data-2026-W41.json` (the year and
+- Once a week the file is copied to `backups/data-2026-W41.json` (the year and
   week number) next to it before it is changed.
 - If the file cannot be read or is not valid, OptoTracker reports the problem
   and exits. It never starts empty over existing data.
@@ -162,21 +177,47 @@ OptoTracker.exe D:\Documents\time.json
 The file is used where it is and nothing is copied. OptoTracker expects to be
 the only program that changes the file while it is running.
 
-The only other file is `temp.ron` in `%APPDATA%\OptoTracker`, which remembers
-the window size, your settings and your last selections. It can be deleted at
-any time.
+The other files in the folder can all be deleted at any time. `temp.ron`
+remembers the window size, your settings and your last selections. On macOS
+and Linux, `instance.lock` and `instance.sock` are how a second copy finds the
+one that runs, and on Linux `icon.png` is the icon for the applications menu.
 
 ## Installing
 
-OptoTracker runs on Windows. Download `OptoTracker.exe` from the
-[latest release](../../releases/latest) and run it; it is a single file that
-needs nothing else. Windows may warn about it the first time, because the file
-is not code-signed.
+Download the file for your system from the
+[latest release](../../releases/latest). It is the whole program and needs
+nothing else. None of the files is code-signed, so Windows and macOS ask
+before they run it for the first time.
+
+**Windows.** Run `OptoTracker.exe`. Windows may warn about it the first time.
+
+**macOS.** Unpack `OptoTracker-macos.zip` and open OptoTracker. It runs on
+macOS 11 and later, on Apple and Intel processors. The first time, macOS
+refuses to open it; allow it with **Open Anyway** under **Privacy & Security**
+in System Settings.
+
+**Linux.** Unpack `OptoTracker-linux-x86_64.tar.gz` and run `opto-tracker`. It
+needs glibc 2.28 or later, which every distribution since 2019 has, and
+nothing else beyond a desktop. The tray icon appears where the desktop shows
+such icons: on KDE, Xfce, Cinnamon and others by themselves, on GNOME with
+the AppIndicator extension, which Ubuntu comes with.
 
 To keep it, open **Settings** and press **Install OptoTracker here**. This
-copies the executable to `%APPDATA%\OptoTracker\OptoTracker.exe`, next to the
-data. The same tab creates a desktop shortcut and turns on starting with
-Windows.
+copies the program into the application folder, next to the data. The same
+tab creates a shortcut and turns on starting when you sign in:
+
+| System  | Installed as      | Shortcut                 | Start at sign-in                           |
+| ------- | ----------------- | ------------------------ | ------------------------------------------ |
+| Windows | `OptoTracker.exe` | on the desktop           | a `Run` value in the registry              |
+| macOS   | `OptoTracker.app` | on the desktop           | a launch agent in `~/Library/LaunchAgents` |
+| Linux   | `opto-tracker`    | in the applications menu | an entry in `~/.config/autostart`          |
+
+The shortcut and the start at sign-in are the only things that OptoTracker
+writes outside its folder, and only when you ask for them.
+
+On Linux a window can only be sent to the tray under X11, so OptoTracker uses
+X11 where there is one, which on a Wayland desktop means XWayland. Started
+with an empty `DISPLAY`, it uses Wayland itself and closes with its window.
 
 To build it yourself you need Rust 1.95 or newer:
 
@@ -184,14 +225,17 @@ To build it yourself you need Rust 1.95 or newer:
 cargo run --release
 ```
 
+On macOS this runs the bare executable. `opto-tracker --bundle FOLDER` writes
+it into the folder as `OptoTracker.app`.
+
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the modules, the rules for the
-data and what a Linux version would need.
+data and where each system is dealt with.
 
 ## What it leaves out
 
 There are no teams, clients, billing, tags or estimates, no sync, and no mobile
 or web version. There is no import or export either: the data file is the
-export. Linux and macOS are not supported yet.
+export.
 
 ## License
 
